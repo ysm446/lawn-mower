@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws:"
+    />
+    <title>芝刈りシミュレーター</title>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="hud"></div>
+    <div id="help">
+      W / S: 前進・後退　A / D: 操舵　Space: 刈刃の上げ下げ　C: 視点切り替え　1〜5: 倍速　P:
+      自動運転(仮)　R: やり直し
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

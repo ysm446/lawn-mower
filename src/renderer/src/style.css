@@ -1,0 +1,40 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', sans-serif;
+}
+
+#view {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+#hud,
+#help {
+  position: fixed;
+  left: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.6;
+  pointer-events: none;
+  user-select: none;
+}
+
+#hud {
+  top: 12px;
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+}
+
+#help {
+  bottom: 12px;
+  font-size: 12px;
+  opacity: 0.85;
+}

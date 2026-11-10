@@ -33,6 +33,12 @@
 - `docs/design/` 配下は実装の設計ガイドを置く場所として使う。
 - `docs/plan/` 配下(goals / plan / progress)は進捗管理用の入口として保つ。
 
+## Python 環境
+
+- Python を使う場合は、リポジトリ直下の venv(`.venv`)で実行する。グローバル環境にパッケージを入れない。
+- `.venv` は Git の管理対象にしない。依存パッケージは `requirements.txt` に記録する。
+- Blender に同梱の Python で動かすスクリプト(書き出しの自動化など)は Blender 側の実行環境を使うため、この限りではない。
+
 ## バージョン管理
 
 - アプリのバージョンは `package.json` の `version` を基準にする。
