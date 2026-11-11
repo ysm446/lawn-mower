@@ -13,7 +13,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { KeyboardInput } from './input'
-import { CAMERA_MODES, CAMERA_MODE_LABELS, CameraRig, type CameraMode } from './render/cameraRig'
+import { CAMERA_MODES, CAMERA_MODE_LABELS, CameraRig, ORBIT_LEVELS, type CameraMode } from './render/cameraRig'
 import { Clippings } from './render/clippings'
 import { GrassBlades } from './render/grassBlades'
 import { createGround } from './render/ground'
@@ -33,6 +33,7 @@ import { GrassField } from './sim/grassField'
 import { loadSettings, setupSettings, type AppSettings } from './settings'
 import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
+import { advanceHour, daylightHours, formatHour, sunAngles } from './sim/sunPath'
 import { blockedByTrees, generateTrees } from './sim/trees'
 import {
   DEFAULT_ZONING,
@@ -59,7 +60,8 @@ const FIELD_ORIGIN = -FIELD_SIZE / 2
 const GROUND_EXTENT = 7000
 const MAX_GRASS_HEIGHT = 0.2
 const SIM_DT = 1 / 120
-const MAX_STEPS_PER_FRAME = 600
+// 1 回の描画で進める刻みの上限。タイムラプスでは 1 コマの間に長い時間が進むので、多めに取る
+const MAX_STEPS_PER_FRAME = 4000
 // 刈った芝が寝る強さ(1 で完全に寝る)。車輪に踏まれた所は 1 にして、刈り跡の中でも筋が残るようにする
 const CUT_LEAN = 0.8
 // 刈刃の上げ下げにかかる時間(秒)と、上げきったときの高さ(m)
@@ -71,7 +73,14 @@ const DECK_CUT_LIMIT = 0.8
 const TRACK_STEP = 0.12
 // 刈った量(m² × 長さの倍率)あたりの粒の数
 const CLIPPINGS_PER_VOLUME = 40
-const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64]
+const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+/** 起動時の時刻(時)。太陽が既定の向き(高度 28°、方位 125°)に近い朝 */
+const START_HOUR = 7.5
+/** タイムラプスに切り替えたとき、倍速がこれより低ければ TIMELAPSE_SCALE に上げる */
+const TIMELAPSE_MIN_SCALE = 16
+const TIMELAPSE_SCALE = 32
+/** 1 秒(実時間)に飛ばす刈りカスの粒の数の上限。これを超えそうなときは、道のり全体から均等に間引く */
+const CLIPPINGS_PER_SECOND = 6000
 
 const F_STOPS = [
   1.4, 1.6, 1.8, 2, 2.2, 2.5, 2.8, 3.2, 3.5, 4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9, 10, 11, 13, 14, 16, 18,
@@ -148,6 +157,25 @@ const blocked = map.trees
 const treeModels = new Trees(treeList, terrain)
 scene.add(treeModels.group)
 const windSettings = { strength: 1 }
+// 時間の表現。タイムラプス(コマ落ち)と、時刻で動く太陽
+const queryHour = Number(query.get('time'))
+const timeSettings = {
+  /** タイムラプス: 時間を毎秒 fps 回にまとめて進め、1 コマごとに動きが飛ぶようにする(画面は間引かない) */
+  timelapse: query.get('timelapse') === '1',
+  fps: 12,
+  /** 時刻(時)。シミュレーションの時間とともに進む */
+  hour: queryHour > 0 ? queryHour : START_HOUR,
+  /** 太陽を時刻に合わせて動かすか。太陽を手で動かすとオフになる */
+  sunFollowsClock: true
+}
+const queryClouds = query.get('clouds')
+if (queryClouds !== null) lighting.settings.cloudCover = Number(queryClouds)
+function setTimelapse(on: boolean): void {
+  timeSettings.timelapse = on
+  // 等倍のままでは、ただ動きが粗くなるだけなので、倍速を上げる
+  if (on && sim.timeScale < TIMELAPSE_MIN_SCALE) sim.timeScale = TIMELAPSE_SCALE
+  syncUi()
+}
 
 const zoneOverlay = new ZoneOverlay(terrain)
 scene.add(zoneOverlay.lines)
@@ -178,8 +206,11 @@ scene.add(grassBlades.mesh)
 const clippings = new Clippings(terrain)
 scene.add(clippings.mesh)
 // このフレームで刈った芝の量(面積 × 長さの倍率)。粒の数を決めるのに使う
-let cutVolume = 0
 let clippingDebt = 0
+// この描画の間に出るはずだった粒の数と、それをもとに決めた次の描画での間引きの割合
+let clippingDemand = 0
+let clippingKeep = 1
+let clippingTime = 0
 
 // 勾配による区分け。設定を変えたら次のフレームで計算し直す
 const zoning = {
@@ -329,6 +360,7 @@ function resetAll(): void {
   sim.state = createVehicleState(START_X, START_Z, 0)
   sim.elapsed = 0
   sim.distance = 0
+  timeSettings.hour = queryHour > 0 ? queryHour : START_HOUR
   route.dirty = true
   route.follower = null
   deckLift = 0
@@ -345,6 +377,9 @@ const queryScale = Number(query.get('timescale'))
 if (queryScale > 0) sim.timeScale = queryScale
 const queryCam = query.get('cam') as CameraMode | null
 if (queryCam && CAMERA_MODES.includes(queryCam)) rig.setMode(queryCam)
+// 定点の視点の、自動の旋回の段(動作確認用)
+const queryOrbit = Number(query.get('orbit'))
+if (queryOrbit) rig.stepOrbit(queryOrbit)
 const queryZoom = Number(query.get('zoom'))
 if (queryZoom > 0) rig.setZoom(queryZoom)
 if (query.get('ui') === '0') document.body.classList.add('minimal-ui')
@@ -379,7 +414,8 @@ const setStatus = addReadout(byId('status-readout'), {
   slope: '勾配',
   altitude: '標高',
   distance: '走行距離',
-  elapsed: '経過時間'
+  elapsed: '経過時間',
+  clock: '時刻'
 })
 const setCameraReadout = addReadout(byId('camera-readout'), {
   lens: 'レンズ',
@@ -500,6 +536,53 @@ syncs.push(
   })
 )
 
+// 時間のパネル
+const timeFields = byId('time-fields')
+const daylight = daylightHours()
+syncs.push(
+  addCheck(
+    timeFields,
+    'タイムラプス',
+    '一定の間隔で撮った写真をつなげたような見え方にします。時間をまとめて進め、機体や影が 1 コマごとに飛びます。視点はなめらかに動きます。倍速が低いときは 32 倍に上げます(T)',
+    () => timeSettings.timelapse,
+    setTimelapse
+  ),
+  addSlider(timeFields, {
+    label: 'コマ数',
+    title: 'タイムラプスで、1 秒あたりに時間を進める回数。少ないほど動きが飛びます',
+    min: 4,
+    max: 60,
+    step: 1,
+    get: () => timeSettings.fps,
+    set: (v) => {
+      timeSettings.fps = v
+    },
+    format: (v) => `毎秒 ${v.toFixed(0)}`
+  }),
+  addSlider(timeFields, {
+    label: '時刻',
+    title: '時刻は倍速に合わせて進み、日が沈むと次の朝へ飛びます。動かすと、太陽がその時刻の位置に来ます',
+    min: Math.ceil(daylight.start * 12) / 12,
+    max: Math.floor(daylight.end * 12) / 12,
+    step: 1 / 12,
+    get: () => timeSettings.hour,
+    set: (v) => {
+      timeSettings.hour = v
+      timeSettings.sunFollowsClock = true
+    },
+    format: formatHour
+  }),
+  addCheck(
+    timeFields,
+    '時刻で太陽を動かす',
+    '時刻に合わせて太陽が動き、影が伸び縮みします。太陽の高度や方位を手で変えるとオフになります',
+    () => timeSettings.sunFollowsClock,
+    (v) => {
+      timeSettings.sunFollowsClock = v
+    }
+  )
+)
+
 const lightFields = byId('light-fields')
 syncs.push(
   addSlider(lightFields, {
@@ -511,6 +594,7 @@ syncs.push(
     get: () => lighting.settings.sunElevation,
     set: (v) => {
       lighting.settings.sunElevation = v
+      timeSettings.sunFollowsClock = false
     },
     format: (v) => `${v.toFixed(0)}°`
   }),
@@ -522,15 +606,28 @@ syncs.push(
     get: () => lighting.settings.sunAzimuth,
     set: (v) => {
       lighting.settings.sunAzimuth = v
+      timeSettings.sunFollowsClock = false
     },
     format: (v) => `${v.toFixed(0)}°`
+  }),
+  addSlider(lightFields, {
+    label: '雲',
+    title: '雲の量。雲は風で流れ、地面に影を落とします。0 で快晴',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    get: () => lighting.settings.cloudCover,
+    set: (v) => {
+      lighting.settings.cloudCover = v
+    },
+    format: (v) => `${(v * 100).toFixed(0)}%`
   })
 )
 
 syncs.push(
   addSlider(lightFields, {
     label: '風',
-    title: '木の枝と葉を揺らす風の強さ。0 で止まります',
+    title: '木の枝と葉を揺らし、雲を流す風の強さ。0 で止まります',
     min: 0,
     max: 3,
     step: 0.1,
@@ -769,6 +866,8 @@ const toggleHelp = setupHelp([
     items: [
       { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰、定点)' },
       { keys: ['右ドラッグ'], text: '定点の視点で、カメラの位置を動かす' },
+      { keys: ['W', 'A', 'S', 'D'], text: '定点の視点で、カメラを回す(A / D で左右、W / S で傾き)。運転は矢印キー' },
+      { keys: ['Q', 'E'], text: '定点の視点で、自動の旋回。押すたびに速さが 1 段変わる(E が右回り、5 段まで)' },
       { keys: ['左ドラッグ'], text: '機体を中心に回り込む(追従視点では、離して 2 秒で背後に戻る)' },
       { keys: ['ホイール'], text: 'カメラを近づける、離す(画角は変わらない)' }
     ]
@@ -776,7 +875,8 @@ const toggleHelp = setupHelp([
   {
     title: 'シミュレーション',
     items: [
-      { keys: ['1', '〜', '7'], text: '倍速(1、2、4、8、16、32、64 倍)' },
+      { keys: ['1', '〜', '9'], text: '倍速(1、2、4、8、16、32、64、128、256 倍)' },
+      { keys: ['T'], text: 'タイムラプス(コマ落ちした早送り)の入り切り' },
       { keys: ['P'], text: '自動運転の開始と停止' },
       { keys: ['G'], text: '経路の表示と非表示' },
       { keys: ['R'], text: 'やり直し(芝を元に戻す)' },
@@ -806,6 +906,25 @@ input.onPress('KeyP', () => setAutoDrive(!sim.autoDrive))
 input.onPress('KeyR', resetAll)
 input.onPress('KeyG', () => setRouteShow(!route.show))
 input.onPress('KeyZ', () => setZoneShow(!zoning.show))
+input.onPress('KeyT', () => setTimelapse(!timeSettings.timelapse))
+// 定点の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
+input.onPress('KeyE', () => rig.stepOrbit(1))
+input.onPress('KeyQ', () => rig.stepOrbit(-1))
+
+// 上中央の案内。定点の視点では、その視点の操作と、自動の旋回の様子を出す
+const viewHint = byId('view-hint')
+const viewHintText = viewHint.textContent ?? ''
+function updateViewHint(): void {
+  let text = viewHintText
+  if (rig.mode === 'fixed') {
+    const level = rig.orbitLevel
+    text =
+      level === 0
+        ? '定点の視点: W / A / S / D でカメラを回す、Q / E で自動の旋回、矢印キーで運転'
+        : `旋回中 ${level > 0 ? '右回り' : '左回り'} 速さ ${Math.abs(level)} / ${ORBIT_LEVELS}(Q / E で速さと向き、W / A / S / D で回転と傾き)`
+  }
+  if (viewHint.textContent !== text) viewHint.textContent = text
+}
 
 // L を押しながら左ドラッグ: 太陽の向きを変える。左右で方位、上下で高度。
 // 空をつかんで回す向きにしてある(右へ引くと、正面の太陽は右へ、手前に落ちる影も右へ動く)。
@@ -831,6 +950,7 @@ input.onPress('KeyZ', () => setZoneShow(!zoning.show))
       if (e.pointerId !== sunPointer) return
       e.stopImmediatePropagation()
       const s = lighting.settings
+      timeSettings.sunFollowsClock = false
       s.sunAzimuth = (((s.sunAzimuth - e.movementX * DEG_PER_PIXEL) % 360) + 360) % 360
       s.sunElevation = Math.min(Math.max(s.sunElevation - e.movementY * DEG_PER_PIXEL, 3), 85)
       syncUi()
@@ -955,7 +1075,8 @@ syncUi()
 
 function stepSimulation(): void {
   const state = sim.state
-  let vehicleInput = input.read()
+  // 定点の視点では、W / A / S / D はカメラを回すのに使う。運転は矢印キーで行う
+  let vehicleInput = input.read(rig.mode !== 'fixed')
   if (sim.autoDrive && route.follower) {
     const out = route.follower.update(state)
     vehicleInput = out
@@ -1002,7 +1123,7 @@ function stepSimulation(): void {
       const newCells = coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
       if (newCells > 0) {
         const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)
-        cutVolume += newCells * coverage.cellSize * coverage.cellSize * length
+        emitClippings(newCells * coverage.cellSize * coverage.cellSize * length, deck)
       }
     }
   }
@@ -1081,7 +1202,8 @@ function updateReadouts(dt: number): void {
     slope: `${((terrain.slopeAt(sim.state.x, sim.state.z, 2) * 180) / Math.PI).toFixed(0)}°`,
     altitude: `${terrain.heightAt(sim.state.x, sim.state.z).toFixed(1)} m`,
     distance: `${sim.distance.toFixed(0)} m`,
-    elapsed: formatTime(sim.elapsed)
+    elapsed: formatTime(sim.elapsed),
+    clock: formatHour(timeSettings.hour)
   })
   setCameraReadout({
     lens: `${s.focalLength.toFixed(0)} mm  F${s.fNumber}`,
@@ -1104,18 +1226,29 @@ function updateReadouts(dt: number): void {
 let focusDistance = 0
 let frameCount = 0
 let autoSyncTimer = 0
+let windTime = 0
+// タイムラプスで、次のコマまでにためておく時間
+let shotTimer = 0
+let shotPending = 0
+// タイムラプスでカメラが追う位置。機体は 1 コマごとに飛ぶので、カメラはその間をなめらかに追う
+const cameraTarget = { ...sim.state }
 const viewDirection = new Vector3()
 const scratch = new Vector3()
-/** このフレームで刈った量に応じて、刈刃から刈りカスを飛ばす */
-function emitClippings(): void {
+/**
+ * 刈った量に応じて、刈刃から刈りカスを飛ばす。シミュレーションの刻みごとに呼ぶ。
+ * 描画のたびにまとめて飛ばすと、倍速が高いときやタイムラプスでは、1 回の描画の間に進んだ道のりの
+ * 終わりにだけ粒が固まる。刻みごとにその時の刈刃の位置から飛ばし、刈り跡に沿って均等に並べる。
+ */
+function emitClippings(volume: number, deck: { lx: number; lz: number; rx: number; rz: number }): void {
+  if (!settings.clippings) return
   // 倍速が高いときは粒を間引く(見た目の量をおおよそ保ち、重くしない)
-  clippingDebt += (cutVolume * CLIPPINGS_PER_VOLUME) / Math.sqrt(sim.timeScale)
-  cutVolume = 0
-  const count = Math.min(Math.floor(clippingDebt), 80)
-  clippingDebt -= Math.floor(clippingDebt)
+  const wanted = (volume * CLIPPINGS_PER_VOLUME) / Math.sqrt(sim.timeScale)
+  clippingDemand += wanted
+  clippingDebt += wanted * clippingKeep
+  const count = Math.floor(clippingDebt)
   if (count === 0) return
+  clippingDebt -= count
   const state = sim.state
-  const deck = deckSegment(state, params)
   const fx = Math.sin(state.heading)
   const fz = Math.cos(state.heading)
   for (let i = 0; i < count; i++) {
@@ -1149,7 +1282,22 @@ function frame(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1)
   last = now
 
-  accumulator += dt * sim.timeScale
+  if (timeSettings.timelapse) {
+    // タイムラプス: 画面は毎回描くが、時間は 1 コマぶんためてからまとめて進める。
+    // 機体、太陽、雲はコマごとに飛び、その間は止まって見える
+    shotTimer += dt
+    shotPending += dt * sim.timeScale
+    const interval = 1 / timeSettings.fps
+    if (shotTimer >= interval) {
+      shotTimer %= interval
+      accumulator += shotPending
+      shotPending = 0
+    }
+  } else {
+    accumulator += dt * sim.timeScale + shotPending
+    shotTimer = 0
+    shotPending = 0
+  }
   let steps = 0
   while (accumulator >= SIM_DT && steps < MAX_STEPS_PER_FRAME) {
     stepSimulation()
@@ -1157,18 +1305,52 @@ function frame(now: number): void {
     steps++
   }
   if (steps === MAX_STEPS_PER_FRAME) accumulator = 0
+  // 時刻と雲は、シミュレーションの時間で進める(倍速を上げると、太陽と雲の影も速く動く)
+  const simSeconds = steps * SIM_DT
+  timeSettings.hour = advanceHour(timeSettings.hour, simSeconds)
+  lighting.advanceClouds(simSeconds, windSettings.strength)
+  if (timeSettings.sunFollowsClock) {
+    const sun = sunAngles(timeSettings.hour)
+    lighting.settings.sunElevation = sun.elevation
+    lighting.settings.sunAzimuth = sun.azimuth
+  }
   mowMap.flush()
-  if (settings.clippings) emitClippings()
-  else cutVolume = 0
+  // 粒が多すぎるときは、次の描画から均等に間引く
+  clippingTime += dt
+  if (steps > 0) {
+    clippingKeep = Math.min(1, (CLIPPINGS_PER_SECOND * clippingTime) / Math.max(clippingDemand, 1e-6))
+    clippingDemand = 0
+    clippingTime = 0
+  }
   // 粒は、倍速を上げても速くなりすぎないように進める
-  clippings.update(dt * Math.min(sim.timeScale, 3))
+  // タイムラプスでは、粒もコマごとに進める
+  if (!timeSettings.timelapse) clippings.update(dt * Math.min(sim.timeScale, 3))
+  else if (steps > 0) clippings.update(Math.min(simSeconds, 3 / timeSettings.fps))
   if (zoning.dirty) updateZoning()
   if (route.dirty && (route.show || sim.autoDrive)) updateRoute()
 
-  mower.sync(sim.state, dt * sim.timeScale, terrain)
-  rig.update(sim.state, dt, terrain)
+  mower.sync(sim.state, simSeconds, terrain)
+  // カメラが追う位置。タイムラプスでは、コマごとに飛ぶ機体をなめらかに追わせる
+  const target = sim.state
+  const jump = Math.hypot(target.x - cameraTarget.x, target.z - cameraTarget.z)
+  if (timeSettings.timelapse && jump < 150) {
+    const follow = 1 - Math.exp(-dt * 6)
+    const x = cameraTarget.x + (target.x - cameraTarget.x) * follow
+    const z = cameraTarget.z + (target.z - cameraTarget.z) * follow
+    const turn = Math.atan2(Math.sin(target.heading - cameraTarget.heading), Math.cos(target.heading - cameraTarget.heading))
+    const heading = cameraTarget.heading + turn * follow
+    Object.assign(cameraTarget, target, { x, z, heading })
+  } else {
+    Object.assign(cameraTarget, target)
+  }
+  if (rig.mode === 'fixed') rig.setArmInput(input.axis(['KeyD'], ['KeyA']), input.axis(['KeyW'], ['KeyS']))
+  else rig.setArmInput(0, 0)
+  rig.update(cameraTarget, dt, terrain)
+  updateViewHint()
   const exposure = rig.exposure
-  treeModels.update(now / 1000, windSettings.strength)
+  // タイムラプスでは木の揺れもコマごとに進める(1 コマごとに枝葉の形が変わり、ちらちらして見える)
+  windTime = (windTime + (timeSettings.timelapse ? simSeconds : dt)) % 4096
+  treeModels.update(windTime, windSettings.strength)
   // 後から読み込んだモデルの材質も、影の仕組みに対応させる
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
   pathLine.tick(dt)
@@ -1205,13 +1387,16 @@ function frame(now: number): void {
     const luminance = Math.pow(2, meterPass.log2Average) / exposure
     const target = ev100FromLuminance(luminance)
     const current = ev100(s.fNumber, s.shutterTime, s.iso)
-    const next = current + (target - current) * (1 - Math.exp(-dt * 3))
+    // タイムラプスでは、雲の影が通るたびに明るさがちらつかないよう、ゆっくり追わせる
+    const rate = timeSettings.timelapse ? 0.7 : 3
+    const next = current + (target - current) * (1 - Math.exp(-dt * rate))
     s.shutterTime = Math.min(Math.max(shutterTimeForEv100(next, s.fNumber, s.iso), 1 / 32000), 0.5)
-    autoSyncTimer += dt
-    if (autoSyncTimer > 0.5) {
-      autoSyncTimer = 0
-      syncUi()
-    }
+  }
+  // 自動で変わる値(露出、時刻、太陽の向き)を、ときどきパネルに映す
+  autoSyncTimer += dt
+  if (autoSyncTimer > 0.5) {
+    autoSyncTimer = 0
+    syncUi()
   }
   updateReadouts(dt)
 }

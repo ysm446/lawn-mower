@@ -1,6 +1,6 @@
 // カメラ。物理カメラの設定値(焦点距離など)を持ち、視点の切り替えを受け持つ。
 
-import { PerspectiveCamera, Vector3 } from 'three'
+import { PerspectiveCamera, Spherical, Vector3 } from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import {
   DEFAULT_CAMERA_SETTINGS,
@@ -21,6 +21,30 @@ const CHASE_RADIUS = Math.hypot(CHASE_BACK, CHASE_UP)
 const CHASE_ELEVATION = Math.atan2(CHASE_UP, CHASE_BACK)
 /** ドラッグをやめてから、背後に戻り始めるまでの時間(秒) */
 const CHASE_RETURN_DELAY = 2
+
+// 定点の視点のキー操作。weather-globe の旋回モードに合わせてある。
+// Q / E: 1 回押すごとに自動の旋回の段を変える。手を離しても回り続ける
+/** 自動の旋回の段の数(右回りと左回りのそれぞれ) */
+export const ORBIT_LEVELS = 5
+/** 1 段目の速さ(度/秒)。1 段ごとに ORBIT_STEP_RATIO 倍にする */
+const ORBIT_DEGREES_PER_SECOND = 1.2
+const ORBIT_STEP_RATIO = 2
+/** 速さを変えるときの時定数(秒) */
+const ORBIT_SECONDS = 0.8
+// W / A / S / D: 押している間だけアームを回す(A / D が方角、W / S が傾き)
+const ARM_YAW_DEGREES_PER_SECOND = 15
+const ARM_TILT_DEGREES_PER_SECOND = 12
+/** 押し始めと離したときに、動きをならす時定数(秒) */
+const ARM_EASE_SECONDS = 0.35
+/** アームを起こせる限界。真上から見下ろす手前で止める(ラジアン。真上が 0) */
+const ARM_MIN_POLAR = 0.06
+
+/** 段から旋回の速さ(度/秒)を求める。段の途中(速さを変えている間)もなめらかにつなぐ */
+function orbitDegreesPerSecond(throttle: number): number {
+  const size = Math.abs(throttle)
+  const rate = size < 1 ? ORBIT_DEGREES_PER_SECOND * size : ORBIT_DEGREES_PER_SECOND * ORBIT_STEP_RATIO ** (size - 1)
+  return Math.sign(throttle) * rate
+}
 
 export type CameraMode = 'chase' | 'orbit' | 'top' | 'fixed'
 
@@ -49,7 +73,17 @@ export class CameraRig {
   private readonly focus = new Vector3()
   private readonly lastFocus = new Vector3()
   private readonly tmp = new Vector3()
+  private readonly arm = new Spherical()
   private initialized = false
+  // 定点の視点の、自動の旋回の段(-ORBIT_LEVELS〜ORBIT_LEVELS。正が右回り)と、なめらかにしたあとの値
+  private orbitStep = 0
+  private orbitThrottle = 0
+  // 定点の視点の、キーでアームを回す向き(-1〜1)と、なめらかにしたあとの値
+  private armYawGoal = 0
+  private armTiltGoal = 0
+  private armYaw = 0
+  private armTilt = 0
+  private controlsDragging = false
   // 追従視点でドラッグして回した分。手を離してしばらくすると 0 に戻る
   private chaseYaw = 0
   private chasePitch = 0
@@ -67,6 +101,13 @@ export class CameraRig {
     this.controls.minDistance = 4
     this.controls.maxDistance = 600
     this.controls.enabled = false
+    // ドラッグしている間は、自動の旋回を止める
+    this.controls.addEventListener('start', () => {
+      this.controlsDragging = true
+    })
+    this.controls.addEventListener('end', () => {
+      this.controlsDragging = false
+    })
     this.setMode('chase')
 
     // 追従視点の左ドラッグ: 機体を中心に回り込む
@@ -128,6 +169,49 @@ export class CameraRig {
     this.chasePitch = 0
     this.chaseDragging = false
     this.initialized = false
+    this.orbitStep = 0
+    this.orbitThrottle = 0
+    this.armYaw = 0
+    this.armTilt = 0
+  }
+
+  /** 定点の視点の、自動の旋回の段(正が右回り。カメラが右へ回り込む)。0 は止まっている */
+  get orbitLevel(): number {
+    return this.orbitStep
+  }
+
+  /** 自動の旋回の段を step だけ変える。定点の視点でだけ働く */
+  stepOrbit(step: number): void {
+    if (this.mode !== 'fixed') return
+    this.orbitStep = Math.min(Math.max(this.orbitStep + step, -ORBIT_LEVELS), ORBIT_LEVELS)
+  }
+
+  /** キーでアームを回す向きを伝える。yaw は右が正、tilt は起こす(上から見下ろす)向きが正。毎フレーム呼ぶ */
+  setArmInput(yaw: number, tilt: number): void {
+    this.armYawGoal = yaw
+    this.armTiltGoal = tilt
+  }
+
+  /** 定点の視点で、自動の旋回とキーの分だけ、注視点のまわりにアームを回す */
+  private turnArm(dt: number): void {
+    this.orbitThrottle += (this.orbitStep - this.orbitThrottle) * (1 - Math.exp(-dt / ORBIT_SECONDS))
+    if (this.orbitStep === 0 && Math.abs(this.orbitThrottle) < 1e-3) this.orbitThrottle = 0
+    const ease = 1 - Math.exp(-dt / ARM_EASE_SECONDS)
+    this.armYaw += (this.armYawGoal - this.armYaw) * ease
+    this.armTilt += (this.armTiltGoal - this.armTilt) * ease
+    if (this.armYawGoal === 0 && Math.abs(this.armYaw) < 1e-3) this.armYaw = 0
+    if (this.armTiltGoal === 0 && Math.abs(this.armTilt) < 1e-3) this.armTilt = 0
+
+    const orbit = this.controlsDragging ? 0 : orbitDegreesPerSecond(this.orbitThrottle)
+    const yaw = (orbit + this.armYaw * ARM_YAW_DEGREES_PER_SECOND) * dt
+    const tilt = this.armTilt * ARM_TILT_DEGREES_PER_SECOND * dt
+    if (yaw === 0 && tilt === 0) return
+    const target = this.controls.target
+    this.arm.setFromVector3(this.tmp.copy(this.camera.position).sub(target))
+    // 右へ回り込むと、上から見て左回りに動く
+    this.arm.theta += (yaw * Math.PI) / 180
+    this.arm.phi = Math.min(Math.max(this.arm.phi - (tilt * Math.PI) / 180, ARM_MIN_POLAR), this.controls.maxPolarAngle)
+    this.camera.position.setFromSpherical(this.arm).add(target)
   }
 
   /** 追従視点と俯瞰の距離の倍率を決める(動作確認用) */
@@ -206,6 +290,7 @@ export class CameraRig {
         }
         this.controls.target.copy(this.focus)
       }
+      this.turnArm(dt)
       this.controls.update()
       this.keepAboveGround(terrain)
     } else {

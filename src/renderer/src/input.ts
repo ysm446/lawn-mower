@@ -30,13 +30,21 @@ export class KeyboardInput {
     return this.down.has(code)
   }
 
-  private axis(positive: string[], negative: string[]): number {
+  /** positive のどれかが押されていれば 1、negative のどれかなら -1。両方または無しなら 0 */
+  axis(positive: string[], negative: string[]): number {
     const p = positive.some((c) => this.down.has(c)) ? 1 : 0
     const n = negative.some((c) => this.down.has(c)) ? 1 : 0
     return p - n
   }
 
-  read(): VehicleInput {
+  /** 運転の入力。letters が false のときは、W / A / S / D を使わず矢印キーだけで運転する */
+  read(letters = true): VehicleInput {
+    if (!letters) {
+      return {
+        throttle: this.axis(['ArrowUp'], ['ArrowDown']),
+        steer: this.axis(['ArrowLeft'], ['ArrowRight'])
+      }
+    }
     return {
       throttle: this.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']),
       steer: this.axis(['KeyA', 'ArrowLeft'], ['KeyD', 'ArrowRight'])
