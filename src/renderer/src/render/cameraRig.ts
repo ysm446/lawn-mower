@@ -65,6 +65,11 @@ const MODE_FOCAL_LENGTH: Record<CameraMode, number> = {
   fixed: 50
 }
 
+/** ドローンと定点の視点で、見る点から離れられる距離の上限(m) */
+const DRONE_MAX_DISTANCE = 600
+/** 誰にも乗っていないときの俯瞰で、見る点から離れられる距離の上限(m) */
+const FREE_MAX_DISTANCE = 1500
+
 /** 定点の視点で、画面の中央の地面を探す距離の上限(m)。空を見ているときのピントの距離にもなる */
 const SIGHT_MAX_DISTANCE = 3000
 
@@ -96,6 +101,12 @@ export class CameraRig {
   // ホイールで変える距離の倍率(1 が初期の距離)。視点ごとに覚えておく
   private chaseZoom = 1
   private topZoom = 1
+  // 誰にも乗っていないときの俯瞰で、最初に見る地面の位置(x, z)。
+  // その後はドローンの視点と同じく、左ドラッグで回り込み、右ドラッグとキーで動かし、ホイールで寄る
+  private readonly freeFocus = new Vector3()
+  private panInputX = 0
+  private panInputY = 0
+  private free = false
 
   constructor(domElement: HTMLElement) {
     this.camera.filmGauge = this.settings.sensorWidth
@@ -103,7 +114,7 @@ export class CameraRig {
     this.controls.enableDamping = true
     this.controls.maxPolarAngle = Math.PI / 2 - 0.03
     this.controls.minDistance = 4
-    this.controls.maxDistance = 600
+    this.controls.maxDistance = DRONE_MAX_DISTANCE
     this.controls.enabled = false
     // ドラッグしている間は、自動の旋回を止める
     this.controls.addEventListener('start', () => {
@@ -135,11 +146,12 @@ export class CameraRig {
       this.chaseIdle = 0
       if (domElement.hasPointerCapture(e.pointerId)) domElement.releasePointerCapture(e.pointerId)
     }
-    // ホイール: カメラを近づける、離す(画角は変えない)。ドローン視点は OrbitControls が受け持つ
+    // ホイール: カメラを近づける、離す(画角は変えない)。
+    // ドローン視点、定点、誰にも乗っていない俯瞰は OrbitControls が受け持つ
     domElement.addEventListener(
       'wheel',
       (e) => {
-        if (this.mode === 'orbit' || this.mode === 'fixed') return
+        if (this.mode === 'orbit' || this.mode === 'fixed' || this.free) return
         e.preventDefault()
         const factor = Math.exp(e.deltaY * 0.0012)
         if (this.mode === 'chase') {
@@ -167,8 +179,11 @@ export class CameraRig {
     this.mode = mode
     this.settings.focalLength = MODE_FOCAL_LENGTH[mode]
     // 定点では、機体を追わずにその場に据える。左ドラッグで見回し、右ドラッグで位置を動かせる
+    // (誰にも乗っていない俯瞰は、updateFree で OrbitControls を使う設定にする)
     this.controls.enabled = mode === 'orbit' || mode === 'fixed'
     this.controls.enablePan = mode === 'fixed'
+    this.controls.screenSpacePanning = true
+    this.controls.maxDistance = DRONE_MAX_DISTANCE
     this.chaseYaw = 0
     this.chasePitch = 0
     this.chaseDragging = false
@@ -228,6 +243,67 @@ export class CameraRig {
     this.chaseIdle = -Infinity
   }
 
+  /** 誰にも乗っていないときの俯瞰で、見る地面の位置を決める(降りたときに、その機体のあたりを見る) */
+  setFreeFocus(x: number, z: number): void {
+    this.freeFocus.set(x, 0, z)
+    // 次の update で、この位置を見るようにカメラを置き直す
+    this.initialized = false
+  }
+
+  /** 誰にも乗っていないときの俯瞰で、見る場所を動かすキーの向き(x は右、y は画面の奥が正)。毎フレーム呼ぶ */
+  setPanInput(x: number, y: number): void {
+    this.panInputX = x
+    this.panInputY = y
+  }
+
+  /**
+   * 誰にも乗っていないときの俯瞰。ドローンの視点と同じく OrbitControls で動かす
+   * (左ドラッグで回り込む、右ドラッグで地面に沿って動かす、ホイールで寄る・引く)。
+   * W / A / S / D(矢印キー)でも、カメラの向きに合わせて見る場所を動かせる。見る点は地面の高さに沿わせる
+   */
+  private updateFree(dt: number, terrain: Terrain): void {
+    const cam = this.camera
+    const controls = this.controls
+    if (!this.initialized) {
+      controls.enabled = true
+      controls.enablePan = true
+      controls.screenSpacePanning = false
+      controls.maxDistance = FREE_MAX_DISTANCE
+      const x = this.freeFocus.x
+      const z = this.freeFocus.z
+      const y = terrain.heightAt(x, z) + 0.8
+      const zoom = this.topZoom
+      controls.target.set(x, y, z)
+      cam.position.set(x - 60 * zoom, y + 150 * zoom, z - 110 * zoom)
+    }
+    const target = controls.target
+    // キーで見る場所を動かす。向きはカメラの向き(上から見た向き)に合わせ、速さは見ている距離に比例させる
+    if (this.panInputX !== 0 || this.panInputY !== 0) {
+      const view = cam.getWorldDirection(this.tmp)
+      const flat = Math.hypot(view.x, view.z)
+      // 真下を見ているときは、画面の上を奥とする
+      const upX = flat > 1e-3 ? view.x / flat : -Math.sin(this.arm.theta)
+      const upZ = flat > 1e-3 ? view.z / flat : -Math.cos(this.arm.theta)
+      const speed = 0.6 * cam.position.distanceTo(target) * dt
+      const dx = (-upZ * this.panInputX + upX * this.panInputY) * speed
+      const dz = (upX * this.panInputX + upZ * this.panInputY) * speed
+      target.x += dx
+      target.z += dz
+      cam.position.x += dx
+      cam.position.z += dz
+    }
+    controls.update()
+    // 見る点を地面の高さに沿わせ、カメラも同じだけ上下させる(丘を越えても、見る点が地面に潜ったり浮いたりしない)
+    const ground = terrain.heightAt(target.x, target.z) + 0.8
+    const lift = ground - target.y
+    target.y += lift
+    cam.position.y += lift
+    this.keepAboveGround(terrain)
+    this.focus.copy(target)
+    this.lastFocus.copy(this.focus)
+    this.initialized = true
+  }
+
   /** 追従視点と俯瞰の距離の倍率を決める(動作確認用) */
   setZoom(zoom: number): void {
     this.chaseZoom = zoom
@@ -243,10 +319,22 @@ export class CameraRig {
     this.camera.aspect = aspect
   }
 
-  update(state: VehicleState, dt: number, terrain: Terrain): void {
+  /**
+   * 毎フレーム呼ぶ。state は追う機体(乗っている機体)。null なら誰にも乗っておらず、
+   * 俯瞰の視点で、ドラッグとキーで動かした場所を見る
+   */
+  update(target: VehicleState | null, dt: number, terrain: Terrain): void {
     const cam = this.camera
     cam.filmGauge = this.settings.sensorWidth
     cam.setFocalLength(this.settings.focalLength)
+
+    this.free = target === null
+    if (target === null) {
+      if (this.mode !== 'top') this.setMode('top')
+      this.updateFree(dt, terrain)
+      return
+    }
+    const state = target
 
     const fx = Math.sin(state.heading)
     const fz = Math.cos(state.heading)

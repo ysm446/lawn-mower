@@ -4,24 +4,22 @@ import type { VehicleInput } from './sim/vehicle'
 
 export class KeyboardInput {
   private readonly down = new Set<string>()
-  private readonly handlers = new Map<string, () => void>()
+  private readonly handlers = new Map<string, () => void | boolean>()
 
   constructor(target: Window) {
     target.addEventListener('keydown', (e) => {
       if (e.repeat) return
       this.down.add(e.code)
       const handler = this.handlers.get(e.code)
-      if (handler) {
-        handler()
-        e.preventDefault()
-      }
+      // 処理が false を返したときは、ブラウザの既定の動き(ダイアログを閉じる、フォーカスを移すなど)を止めない
+      if (handler && handler() !== false) e.preventDefault()
     })
     target.addEventListener('keyup', (e) => this.down.delete(e.code))
     target.addEventListener('blur', () => this.down.clear())
   }
 
-  /** キーを押した瞬間に呼ぶ処理を登録する */
-  onPress(code: string, handler: () => void): void {
+  /** キーを押した瞬間に呼ぶ処理を登録する。処理が false を返すと、そのキーの既定の動きを止めない */
+  onPress(code: string, handler: () => void | boolean): void {
     this.handlers.set(code, handler)
   }
 

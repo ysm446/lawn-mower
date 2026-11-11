@@ -20,7 +20,6 @@ import { NormalPreview } from './render/normalPreview'
 import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
-import { MowerModel } from './render/mowerModel'
 import { overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
 import { Trees } from './render/trees'
@@ -29,7 +28,7 @@ import { PlotOverlay } from './render/plotOverlay'
 import { ZoneOverlay } from './render/zoneOverlay'
 import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposure'
 import { CoverageGrid } from './sim/coverage'
-import { planCoverage, type CoveragePlan } from './sim/coveragePlan'
+import { planCoverage } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
 import { loadSettings, setupSettings, type AppSettings } from './settings'
@@ -46,15 +45,8 @@ import {
   computeZoning,
   type ZoningResult
 } from './sim/zoning'
-import {
-  FAIRWAY_MOWER,
-  createVehicleState,
-  deckSegment,
-  minTurnRadius,
-  stepVehicle,
-  reelSegments,
-  wheelPositions
-} from './sim/vehicle'
+import { FAIRWAY_MOWER, minTurnRadius, type VehicleInput } from './sim/vehicle'
+import { MowerUnit, type StepContext } from './mowerUnit'
 import { SunGizmo } from './sunGizmo'
 import { addCheck, addPanelToggle, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
 
@@ -66,15 +58,8 @@ const MAX_GRASS_HEIGHT = 0.2
 const SIM_DT = 1 / 120
 // 1 回の描画で進める刻みの上限。タイムラプスでは 1 コマの間に長い時間が進むので、多めに取る
 const MAX_STEPS_PER_FRAME = 4000
-// 刈った芝が寝る強さ(1 で完全に寝る)。車輪に踏まれた所は 1 にして、刈り跡の中でも筋が残るようにする
-const CUT_LEAN = 0.8
-// 刈刃の上げ下げにかかる時間(秒)と、上げきったときの高さ(m)
-const DECK_MOVE_TIME = 0.5
-const DECK_LIFT_HEIGHT = 0.1
-// 刈刃がこれより上がっている間は刈らない(0 が下げきり、1 が上げきり)
-const DECK_CUT_LIMIT = 0.8
-// 車輪の跡を描き込む間隔(m)
-const TRACK_STEP = 0.12
+// 乗っていない機体と、自動運転中の機体に渡す、手の運転の入力(何もしない)
+const IDLE_INPUT: VehicleInput = { throttle: 0, steer: 0 }
 // 刈った量(m² × 長さの倍率)あたりの粒の数
 const CLIPPINGS_PER_VOLUME = 40
 const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -253,7 +238,7 @@ function updateZoning(): void {
   )
   zoning.result = result
   plotting.dirty = true
-  route.dirty = true
+  markRoutesDirty()
   zoneOverlay.update(result, blocked)
   const total = result.zoneArea.reduce((a, b) => a + b)
   const area = (m2: number): string =>
@@ -274,9 +259,7 @@ const plotting = {
   result: null as PlotResult | null,
   /** 乗用機で刈れて、出発点から届く範囲(1)。区画をまたぐ移動で通ってよい所 */
   reach: null as Uint8Array | null,
-  /** 今刈る区画の番号 */
-  current: 0,
-  /** 刈り終えた区画 */
+  /** 刈り終えた区画。どの機体が刈る区画かは、機体ごとに持つ(MowerUnit.plot) */
   done: new Set<number>(),
   /** 1 つ刈り終えたら、続けて次の区画へ進むか */
   sequence: true
@@ -302,11 +285,62 @@ function updatePlots(): void {
   plotting.reach = reach
   plotting.result = result
   plotting.done.clear()
-  // 機体のいる区画から始める
-  plotting.current = Math.max(plotAt(sim.state.x, sim.state.z), 0)
+  // 区画が変わったので、受け持つ区画は決め直す(自動運転のとき、空いている区画を引き受ける)
+  for (const unit of mowers) unit.plot = -1
   plotOverlay.update(result)
-  plotOverlay.setState(plotting.current, plotting.done)
-  route.dirty = true
+  refreshPlotOverlay()
+  markRoutesDirty()
+}
+
+/** 全台の経路を作り直す印をつける。dropFollower なら、走っている経路も捨てる */
+function markRoutesDirty(dropFollower = false): void {
+  for (const unit of mowers) {
+    unit.route.dirty = true
+    if (dropFollower) unit.route.follower = null
+  }
+}
+
+/** 区画の線を描き直す。乗っている機体の受け持つ区画を「今の区画」として目立たせる */
+function refreshPlotOverlay(): void {
+  plotOverlay.setState(rider ? rider.plot : -1, plotting.done)
+}
+
+/** ほかの機体が受け持っていて、まだ刈り終えていない区画か */
+function plotTaken(id: number, except: MowerUnit): boolean {
+  return mowers.some((m) => m !== except && m.plot === id && m.autoDrive && !plotting.done.has(id))
+}
+
+/**
+ * 機体に、刈る区画を割り当てる。今の区画がまだ刈り終えておらず、ほかの機体と重ならなければそのまま。
+ * そうでなければ、機体のいる区画、なければ近い順に、刈り終えておらず誰も受け持っていない区画を選ぶ
+ */
+function assignPlot(unit: MowerUnit): void {
+  const result = plotting.result
+  if (!result || result.plots.length === 0) return
+  const free = (id: number): boolean => id >= 0 && !plotting.done.has(id) && !plotTaken(id, unit)
+  if (free(unit.plot)) return
+  const here = plotAt(unit.state.x, unit.state.z)
+  if (free(here)) {
+    unit.plot = here
+    return
+  }
+  const cell = terrain.options.cell
+  let best = -1
+  let bestDistance = Infinity
+  for (const plot of result.plots) {
+    if (!free(plot.id)) continue
+    const d = Math.hypot(
+      terrain.origin + plot.centerX * cell - unit.state.x,
+      terrain.origin + plot.centerZ * cell - unit.state.z
+    )
+    if (d < bestDistance) {
+      bestDistance = d
+      best = plot.id
+    }
+  }
+  // 空いている区画がなければ、刈り終えていない区画を(重なってもよいので)受け持つ
+  if (best < 0) best = result.plots.find((p) => !plotting.done.has(p.id))?.id ?? -1
+  unit.plot = best
 }
 
 /** その地点の区画の番号。区画の外なら -1 */
@@ -320,37 +354,65 @@ function plotAt(x: number, z: number): number {
   return result.labels[iz * n + ix]
 }
 
-/** 刈る区画を選ぶ。自動運転は止めずに、今いる所からその区画へ向かう経路を作り直す */
+/**
+ * 乗っている機体が刈る区画を選ぶ。自動運転は止めずに、今いる所からその区画へ向かう経路を作り直す。
+ * 誰にも乗っていないときは何もしない
+ */
 function selectPlot(id: number): void {
   const count = plotting.result?.plots.length ?? 0
-  if (count === 0) return
-  plotting.current = ((id % count) + count) % count
-  plotOverlay.setState(plotting.current, plotting.done)
-  route.dirty = true
-  route.follower = null
+  if (count === 0 || !rider) return
+  const plot = ((id % count) + count) % count
+  // その区画を受け持っていたほかの機体は、別の区画を選び直す
+  for (const other of mowers) {
+    if (other === rider || other.plot !== plot) continue
+    other.plot = -1
+    other.route.dirty = true
+    other.route.follower = null
+  }
+  rider.plot = plot
+  rider.route.dirty = true
+  rider.route.follower = null
+  refreshPlotOverlay()
   syncUi()
 }
 
-/** 今の区画を刈り終えたとき。続けて進む設定なら、まだ刈っていない次の区画へ移る */
-function finishPlot(): void {
-  const count = plotting.result?.plots.length ?? 0
-  plotting.done.add(plotting.current)
-  let next = -1
-  for (let step = 1; step < count && next < 0; step++) {
-    const id = (plotting.current + step) % count
-    if (!plotting.done.has(id)) next = id
+/** 機体が受け持つ区画を刈り終えたとき。続けて進む設定なら、まだ刈っていない空いた区画へ移る */
+function finishPlot(unit: MowerUnit): void {
+  if (unit.plot >= 0) plotting.done.add(unit.plot)
+  unit.route.follower = null
+  unit.route.dirty = true
+  if (plotting.sequence) {
+    assignPlot(unit)
+    if (unit.plot >= 0 && !plotting.done.has(unit.plot)) {
+      refreshPlotOverlay()
+      syncUi()
+      return
+    }
   }
-  if (plotting.sequence && next >= 0) {
-    selectPlot(next)
-    return
-  }
-  plotOverlay.setState(plotting.current, plotting.done)
-  setAutoDrive(false)
+  unit.autoDrive = false
+  refreshPlotOverlay()
+  syncUi()
 }
 
 const params = FAIRWAY_MOWER
-const mower = new MowerModel(params)
-scene.add(mower.root)
+
+// 芝刈り機。出発点に、横に並べて置く。起動時の指定 mowers=1〜5 で台数を変えられる(既定は 3 台)
+const MOWER_COUNT = Math.min(Math.max(Math.round(Number(query.get('mowers')) || 3), 1), 5)
+/** 出発点に並べるときの、機体どうしの横の間隔(m) */
+const MOWER_SPACING = 5
+/** i 台目の出発点。出発点を中心に、進む向き(+Z)と直交する向き(X)に並べる */
+function startPose(i: number): { x: number; z: number; heading: number } {
+  return { x: START_X + (i - (MOWER_COUNT - 1) / 2) * MOWER_SPACING, z: START_Z, heading: 0 }
+}
+const mowers: MowerUnit[] = []
+for (let i = 0; i < MOWER_COUNT; i++) {
+  const pose = startPose(i)
+  const unit = new MowerUnit(i, params, pose.x, pose.z, pose.heading)
+  scene.add(unit.model.root)
+  mowers.push(unit)
+}
+/** 乗っている機体。null なら誰にも乗っておらず、俯瞰で全体を見る */
+let rider: MowerUnit | null = null
 
 const coverage = new CoverageGrid(FIELD_ORIGIN, FIELD_ORIGIN, FIELD_SIZE, FIELD_SIZE, 0.5)
 
@@ -372,44 +434,43 @@ composer.addPass(dofPass)
 composer.addPass(new OutputPass())
 
 const sim = {
-  state: createVehicleState(START_X, START_Z, 0),
   timeScale: 1,
   cutHeightMm: 18,
-  autoDrive: false,
-  elapsed: 0,
-  distance: 0
+  elapsed: 0
 }
-let deckLift = 0
-const unitsNow = new Float64Array(params.reels.length * 4)
-const unitsPrev = new Float64Array(params.reels.length * 4)
-let unitsStarted = false
 let accumulator = 0
-const wheelsNow = new Float64Array(params.wheels.length * 2)
-const wheelsPrev = new Float64Array(params.wheels.length * 2)
-let tracksStarted = false
 
-// 自動運転の経路。区分けや設定が変わったら、必要になった時点で作り直す
+// 自動運転の経路の設定(全台で共通)。経路そのものは機体ごとに持つ(MowerUnit.route)。
+// 区分けや設定が変わったら、必要になった時点で作り直す
 const route = {
   options: { angleDeg: 0, overlap: 0.2, headlandPasses: 3 },
-  show: query.get('path') === '1',
-  dirty: true,
-  plan: null as CoveragePlan | null,
-  follower: null as PathFollower | null,
-  text: { plot: '-', area: '-', lines: '-', cut: '-', transit: '-', time: '-' }
+  show: query.get('path') === '1'
 }
+/** 経路の設定(機体ごとの経路を作る所では、route が機体の経路を指すので、こちらから読む) */
+function routeOptions(): typeof route.options {
+  return route.options
+}
+// 地面に描く経路の線。乗っている機体の経路を出す
 const pathLine = new PathLine(terrain)
 scene.add(pathLine.lines)
 
+/** 経路の線を、乗っている機体の経路に描き直す */
+function refreshPathLine(): void {
+  pathLine.update(rider?.route.plan?.path ?? null)
+}
+
 const formatKm = (m: number): string => `${(m / 1000).toFixed(2)} km`
 
-/** 今いる所を出発点として、今刈る区画の経路を作る */
-function updateRoute(): void {
+/** 機体の今いる所を出発点として、受け持つ区画の経路を作る */
+function updateRoute(unit: MowerUnit): void {
   if (zoning.dirty || !zoning.result || plotting.dirty || !plotting.result) updatePlots()
+  const route = unit.route
   route.dirty = false
+  assignPlot(unit)
   const plots = plotting.result as PlotResult
   const cell = terrain.options.cell
   const mask = new Uint8Array(plots.labels.length)
-  for (let i = 0; i < mask.length; i++) mask[i] = plots.labels[i] === plotting.current ? 1 : 0
+  for (let i = 0; i < mask.length; i++) mask[i] = plots.labels[i] === unit.plot ? 1 : 0
   const plan = planCoverage(
     {
       samples: terrain.samples,
@@ -420,19 +481,20 @@ function updateRoute(): void {
       transit: plotting.reach ?? undefined
     },
     {
-      ...route.options,
+      ...routeOptions(),
       cutWidth: params.cutWidth,
       turnRadius: minTurnRadius(params) * 1.15,
       deckOffset: params.deckOffset,
       runIn: 1
     },
-    sim.state.x,
-    sim.state.z,
-    sim.state.heading
+    unit.state.x,
+    unit.state.z,
+    unit.state.heading
   )
   route.plan = plan
   route.follower = new PathFollower(plan.path, params)
-  pathLine.update(plan.path)
+  if (unit === rider) refreshPathLine()
+  refreshPlotOverlay()
   // 旋回や外周では操舵に応じて減速するので、その分を大まかに見込む
   const seconds =
     plan.cutLength / (params.maxSpeed * 0.85) +
@@ -440,7 +502,7 @@ function updateRoute(): void {
   let cells = 0
   for (let i = 0; i < mask.length; i++) cells += mask[i]
   route.text = {
-    plot: `${plotting.current + 1} / ${plots.plots.length}(済み ${plotting.done.size})`,
+    plot: `${unit.plot + 1} / ${plots.plots.length}(済み ${plotting.done.size})`,
     area: `${((cells * cell * cell) / 10000).toFixed(2)} ha`,
     lines: `${plan.sweepCount}`,
     cut: formatKm(plan.cutLength),
@@ -450,28 +512,35 @@ function updateRoute(): void {
 }
 
 function resetAll(): void {
-  sim.state = createVehicleState(START_X, START_Z, 0)
+  mowers.forEach((unit, i) => {
+    const pose = startPose(i)
+    unit.reset(pose.x, pose.z, pose.heading)
+  })
   sim.elapsed = 0
-  sim.distance = 0
   timeSettings.hour = queryHour > 0 ? queryHour : START_HOUR
-  // 区画は最初の状態に戻す(刈り終えた印を消し、出発点の区画を選ぶ)
+  // 区画は最初の状態に戻す(刈り終えた印を消す)
   plotting.dirty = true
-  route.dirty = true
-  route.follower = null
-  deckLift = 0
-  unitsStarted = false
+  refreshPathLine()
   accumulator = 0
   coverage.reset()
   clippings.clear()
   mowMap.reset(UNCUT_HEIGHT)
 }
 
-// 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1&path=1
-if (query.get('auto') === '1') sim.autoDrive = true
+// 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1&path=1&mowers=3&ride=1
+// 最初は誰にも乗らず、出発点のあたりを俯瞰で見る
+rig.setFreeFocus(START_X, START_Z)
+rig.setMode('top')
+if (query.get('auto') === '1') for (const unit of mowers) unit.autoDrive = true
 const queryScale = Number(query.get('timescale'))
 if (queryScale > 0) sim.timeScale = queryScale
 const queryCam = query.get('cam') as CameraMode | null
-if (queryCam && CAMERA_MODES.includes(queryCam)) rig.setMode(queryCam)
+// ride=N で N 号機に乗った状態で始める。俯瞰以外の視点を指定したときは、指定がなければ 1 号機に乗る
+const queryRide = Math.round(Number(query.get('ride')))
+if (queryRide >= 1 && queryRide <= mowers.length) rider = mowers[queryRide - 1]
+else if (queryCam && queryCam !== 'top' && CAMERA_MODES.includes(queryCam)) rider = mowers[0]
+if (queryCam && CAMERA_MODES.includes(queryCam) && (rider || queryCam === 'top')) rig.setMode(queryCam)
+else if (rider) rig.setMode('chase')
 // 定点の視点の、自動の旋回の段(動作確認用)
 const queryOrbit = Number(query.get('orbit'))
 if (queryOrbit) rig.stepOrbit(queryOrbit)
@@ -506,6 +575,7 @@ syncs.push(
 )
 
 const setStatus = addReadout(byId('status-readout'), {
+  mower: '機体',
   speed: '速度',
   deck: '刈刃',
   area: '刈った面積',
@@ -902,7 +972,7 @@ const routeSlider = (
     get: () => route.options[key],
     set: (v) => {
       route.options[key] = v
-      route.dirty = true
+      markRoutesDirty()
     },
     format
   })
@@ -927,8 +997,7 @@ syncs.push(
     set: (v) => {
       plotting.options.targetArea = v
       plotting.dirty = true
-      route.dirty = true
-      route.follower = null
+      markRoutesDirty(true)
     },
     format: (v) => `${(v / 10000).toFixed(1)} ha`
   }),
@@ -967,28 +1036,93 @@ syncs.push(
       title: `${CAMERA_MODE_LABELS[mode]}の視点(C で切り替え)`
     })),
     () => rig.mode,
-    (mode) => {
-      rig.setMode(mode)
-      syncUi()
-    }
+    (mode) => setView(mode)
   )
 )
 
+/**
+ * 視点を切り替える。誰にも乗っていないときに俯瞰以外を選んだら、
+ * 見ている場所にいちばん近い機体に乗る(追従やドローンは、追う機体が要るため)
+ */
+function setView(mode: CameraMode): void {
+  if (!rider && mode !== 'top') boardMower(nearestMower(rig.focusPoint.x, rig.focusPoint.z), mode)
+  else rig.setMode(mode)
+  syncUi()
+}
+
+/** その地点にいちばん近い機体 */
+function nearestMower(x: number, z: number): MowerUnit {
+  let best = mowers[0]
+  let bestDistance = Infinity
+  for (const unit of mowers) {
+    const d = Math.hypot(unit.state.x - x, unit.state.z - z)
+    if (d < bestDistance) {
+      bestDistance = d
+      best = unit
+    }
+  }
+  return best
+}
+
+/**
+ * 機体に乗る(ほかの機体に乗っていたら、乗り移る)。誰にも乗っていなかったときは、mode の視点(既定は追従)にする。
+ * 乗り移るときは、今の視点のまま
+ */
+function boardMower(unit: MowerUnit, mode: CameraMode = 'chase'): void {
+  const wasFree = rider === null
+  rider = unit
+  // カメラが追う位置を、今の機体の位置から始める(タイムラプスで、前の機体の位置から滑ってこないように)
+  Object.assign(unit.cameraTarget, unit.state)
+  if (wasFree) rig.setMode(mode)
+  refreshPathLine()
+  refreshPlotOverlay()
+  syncUi()
+}
+
+/** 機体から降りて、その機体のあたりを俯瞰で見る。降りた機体は、自動運転ならそのまま刈り続ける */
+function leaveMower(): void {
+  if (!rider) return
+  rig.setFreeFocus(rider.state.x, rider.state.z)
+  rider = null
+  rig.setMode('top')
+  refreshPathLine()
+  refreshPlotOverlay()
+  syncUi()
+}
+
+/** 次の機体に乗り移る(誰にも乗っていなければ 1 号機に乗る) */
+function boardNextMower(step: number): void {
+  const index = rider ? (rider.index + step + mowers.length) % mowers.length : 0
+  boardMower(mowers[index])
+}
+
 const autoButton = byId<HTMLButtonElement>('toggle-auto')
+/** 自動運転の対象。乗っている機体、誰にも乗っていなければ全台 */
+function autoTargets(): MowerUnit[] {
+  return rider ? [rider] : mowers
+}
+/** 自動運転の対象が、すべて自動運転中か */
+function autoDriving(): boolean {
+  return autoTargets().every((unit) => unit.autoDrive)
+}
 function setAutoDrive(on: boolean): void {
-  sim.autoDrive = on
-  // まだ走り出していない経路は、今いる所から作り直す
-  if (on && (!route.follower || route.follower.segment === 0)) route.dirty = true
+  for (const unit of autoTargets()) {
+    unit.autoDrive = on
+    // まだ走り出していない経路は、今いる所から作り直す
+    if (on && (!unit.route.follower || unit.route.follower.segment === 0)) unit.route.dirty = true
+  }
   syncUi()
 }
 syncs.push(() => {
-  autoButton.setAttribute('aria-pressed', String(sim.autoDrive))
-  const label = sim.autoDrive ? '自動運転を止める' : '自動運転'
+  const on = autoDriving()
+  autoButton.setAttribute('aria-pressed', String(on))
+  const whom = rider ? rider.name : '全台'
+  const label = on ? `自動運転を止める(${whom})` : `自動運転(${whom})`
   autoButton.setAttribute('aria-label', label)
   autoButton.title = `${label}(P)`
 })
 autoButton.addEventListener('click', () => {
-  setAutoDrive(!sim.autoDrive)
+  setAutoDrive(!autoDriving())
   autoButton.blur()
 })
 const resetButton = byId<HTMLButtonElement>('reset')
@@ -998,6 +1132,18 @@ resetButton.addEventListener('click', () => {
 })
 
 const toggleHelp = setupHelp([
+  {
+    title: '機体',
+    items: [
+      { keys: ['クリック'], text: '芝刈り機に乗る。乗っている間にほかの機体をクリックすると、乗り移る' },
+      { keys: ['Tab'], text: '次の機体に乗り移る' },
+      { keys: ['Esc'], text: '降りて、俯瞰で全体を見る(降りた機体は、自動運転ならそのまま刈り続ける)' },
+      { keys: ['左ドラッグ'], text: '誰にも乗っていないとき、見ている所を中心に回り込む(見下ろす角度も変わる)' },
+      { keys: ['右ドラッグ'], text: '誰にも乗っていないとき、見る場所を地面に沿って動かす' },
+      { keys: ['W', 'A', 'S', 'D'], text: '誰にも乗っていないとき、見る場所を動かす(カメラの向きに合わせる。矢印キーも使える)' },
+      { keys: ['ホイール'], text: '誰にも乗っていないとき、寄る、引く' }
+    ]
+  },
   {
     title: '運転',
     items: [
@@ -1024,10 +1170,10 @@ const toggleHelp = setupHelp([
     items: [
       { keys: ['1', '〜', '9'], text: '倍速(1、2、4、8、16、32、64、128、256 倍)' },
       { keys: ['T'], text: 'タイムラプス(コマ落ちした早送り)の入り切り' },
-      { keys: ['P'], text: '自動運転の開始と停止' },
+      { keys: ['P'], text: '自動運転の開始と停止(乗っている機体。誰にも乗っていなければ全台)' },
       { keys: ['G'], text: '区画と経路の表示と非表示' },
-      { keys: ['[', ']'], text: '刈る区画を前、次に切り替える' },
-      { keys: ['クリック'], text: '区画を表示しているとき、その区画を刈る区画に選ぶ' },
+      { keys: ['[', ']'], text: '乗っている機体の刈る区画を、前、次に切り替える' },
+      { keys: ['クリック'], text: '区画を表示しているとき、乗っている機体の刈る区画に選ぶ' },
       { keys: ['R'], text: 'やり直し(芝を元に戻す)' },
       { keys: ['Z'], text: '勾配による区分けの表示と非表示' }
     ]
@@ -1045,21 +1191,59 @@ if (query.get('help') === '1') toggleHelp()
 
 const input = new KeyboardInput(window)
 input.onPress('Space', () => {
-  if (!sim.autoDrive) sim.state.deckDown = !sim.state.deckDown
+  if (rider && !rider.autoDrive) rider.state.deckDown = !rider.state.deckDown
 })
 input.onPress('KeyC', () => {
-  rig.nextMode()
-  syncUi()
+  setView(CAMERA_MODES[(CAMERA_MODES.indexOf(rig.mode) + 1) % CAMERA_MODES.length])
 })
-input.onPress('KeyP', () => setAutoDrive(!sim.autoDrive))
+input.onPress('KeyP', () => setAutoDrive(!autoDriving()))
 input.onPress('KeyR', resetAll)
 input.onPress('KeyG', () => setRouteShow(!route.show))
 input.onPress('KeyZ', () => setZoneShow(!zoning.show))
 input.onPress('KeyT', () => setTimelapse(!timeSettings.timelapse))
-input.onPress('BracketLeft', () => selectPlot(plotting.current - 1))
-input.onPress('BracketRight', () => selectPlot(plotting.current + 1))
+input.onPress('BracketLeft', () => {
+  if (rider) selectPlot(rider.plot - 1)
+})
+input.onPress('BracketRight', () => {
+  if (rider) selectPlot(rider.plot + 1)
+})
+// ダイアログ(操作の一覧、設定)が開いているときは、Tab と Esc をダイアログに任せる(フォーカスの移動、閉じる)
+const dialogOpen = (): boolean => document.querySelector('dialog[open]') !== null
+input.onPress('Tab', () => {
+  if (dialogOpen()) return false
+  boardNextMower(1)
+})
+input.onPress('Escape', () => {
+  if (dialogOpen()) return false
+  leaveMower()
+})
 
-// 区画を表示している間は、地面をクリックして刈る区画を選べる(ドラッグは視点の操作なので除く)
+/** 画面の上の点(クライアント座標)の近くに写っている機体。なければ null */
+function mowerAtScreen(clientX: number, clientY: number): MowerUnit | null {
+  const rect = canvas.getBoundingClientRect()
+  const point = new Vector3()
+  let best: MowerUnit | null = null
+  let bestDistance = Infinity
+  for (const unit of mowers) {
+    const { x, z } = unit.state
+    point.set(x, terrain.heightAt(x, z) + 1, z).project(rig.camera)
+    if (point.z > 1) continue
+    const sx = rect.left + ((point.x + 1) / 2) * rect.width
+    const sy = rect.top + ((1 - point.y) / 2) * rect.height
+    // 機体の大きさ(約 3 m)が画面で何画素になるかを見て、それより少し広い範囲を当たりにする
+    const distance = rig.camera.position.distanceTo(point.set(x, terrain.heightAt(x, z) + 1, z))
+    const pixels = (3 / (2 * distance * Math.tan((rig.camera.fov * Math.PI) / 360))) * rect.height
+    const d = Math.hypot(clientX - sx, clientY - sy)
+    if (d < Math.max(28, pixels * 0.8) && d < bestDistance) {
+      bestDistance = d
+      best = unit
+    }
+  }
+  return best
+}
+
+// クリック: 芝刈り機の上なら、その機体に乗る(乗り移る)。
+// 区画を表示している間は、地面をクリックして、乗っている機体の刈る区画を選べる(ドラッグは視点の操作なので除く)
 {
   let downX = 0
   let downY = 0
@@ -1068,8 +1252,14 @@ input.onPress('BracketRight', () => selectPlot(plotting.current + 1))
     downY = e.clientY
   })
   canvas.addEventListener('pointerup', (e) => {
-    if (e.button !== 0 || !route.show || input.isDown('KeyL')) return
+    if (e.button !== 0 || input.isDown('KeyL')) return
     if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) return
+    const picked = mowerAtScreen(e.clientX, e.clientY)
+    if (picked) {
+      if (picked !== rider) boardMower(picked)
+      return
+    }
+    if (!route.show || !rider) return
     // 視線を少しずつ進め、地面に当たった所の区画を選ぶ
     const rect = canvas.getBoundingClientRect()
     const ray = new Vector3(
@@ -1085,7 +1275,7 @@ input.onPress('BracketRight', () => selectPlot(plotting.current + 1))
       point.add(ray)
       if (point.y > terrain.heightAt(point.x, point.z)) continue
       const id = plotAt(point.x, point.z)
-      if (id >= 0 && id !== plotting.current) selectPlot(id)
+      if (id >= 0 && id !== rider.plot) selectPlot(id)
       return
     }
   })
@@ -1099,12 +1289,16 @@ const viewHint = byId('view-hint')
 const viewHintText = viewHint.textContent ?? ''
 function updateViewHint(): void {
   let text = viewHintText
-  if (rig.mode === 'fixed') {
+  if (!rider) {
+    text = '俯瞰: 芝刈り機をクリックで乗る。左ドラッグで回る、右ドラッグか W / A / S / D で動かす、ホイールで寄る、P で全台の自動運転'
+  } else if (rig.mode === 'fixed') {
     const level = rig.orbitLevel
     text =
       level === 0
         ? '定点の視点: W / A / S / D でカメラを回す、Q / E で自動の旋回、矢印キーで運転'
         : `旋回中 ${level > 0 ? '右回り' : '左回り'} 速さ ${Math.abs(level)} / ${ORBIT_LEVELS}(Q / E で速さと向き、W / A / S / D で回転と傾き)`
+  } else {
+    text = `${rider.name}: W / S で前後、A / D で操舵、Space で刈刃、C で視点、Tab で乗り移る、Esc で降りる、? で操作の一覧`
   }
   if (viewHint.textContent !== text) viewHint.textContent = text
 }
@@ -1267,98 +1461,25 @@ syncUi()
 // ------------------------------------------------ シミュレーション
 
 function stepSimulation(): void {
-  const state = sim.state
-  // 定点の視点では、W / A / S / D はカメラを回すのに使う。運転は矢印キーで行う
-  let vehicleInput = input.read(rig.mode !== 'fixed')
-  if (sim.autoDrive && route.follower) {
-    const out = route.follower.update(state)
-    vehicleInput = out
-    state.deckDown = out.deckDown
-    if (out.finished) finishPlot()
+  // 手で運転するのは、乗っている機体だけ。定点の視点では、W / A / S / D はカメラを回すのに使い、運転は矢印キーで行う
+  const manual = rider && !rider.autoDrive ? input.read(rig.mode !== 'fixed') : IDLE_INPUT
+  const ctx: StepContext = {
+    terrain,
+    mowMap,
+    coverage,
+    cutHeight: sim.cutHeightMm / 1000,
+    maxGrassHeight: MAX_GRASS_HEIGHT,
+    dt: SIM_DT,
+    onCut: (unit, newCells, deck) => {
+      // まだ刈っていない所を通った分だけ、刈りカスが出る。長い芝ほど多い
+      const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)
+      emitClippings(unit, newCells * coverage.cellSize * coverage.cellSize * length, deck)
+    }
   }
-
-  const grade = terrain.gradeAlong(state.x, state.z, state.heading, params.wheelbase)
-  stepVehicle(state, vehicleInput, params, SIM_DT, grade)
+  for (const unit of mowers) {
+    unit.step(unit === rider ? manual : IDLE_INPUT, ctx, () => finishPlot(unit))
+  }
   sim.elapsed += SIM_DT
-  sim.distance += Math.abs(state.speed) * SIM_DT
-
-  // 刈刃は一瞬では上下しない。下りきるまでの間は、高めに刈る(刈り始めと刈り終わりがなだらかになる)
-  const liftTarget = state.deckDown ? 0 : 1
-  const liftStep = SIM_DT / DECK_MOVE_TIME
-  deckLift += Math.min(Math.max(liftTarget - deckLift, -liftStep), liftStep)
-  const cutting = deckLift < DECK_CUT_LIMIT && Math.abs(state.speed) > 0.01
-
-  // リールは 1 連ずつ別々の帯として描き込む(位置と幅は機種の定義による)
-  const hx = Math.sin(state.heading)
-  const hz = Math.cos(state.heading)
-  reelSegments(state, params, unitsNow)
-  const deck = deckSegment(state, params)
-  if (cutting && unitsStarted) {
-    const sign = state.speed >= 0 ? 1 : -1
-    const height = sim.cutHeightMm / 1000 + deckLift * DECK_LIFT_HEIGHT
-    for (let k = 0; k < unitsNow.length; k += 4) {
-      mowMap.addQuad(
-        unitsPrev[k],
-        unitsPrev[k + 1],
-        unitsPrev[k + 2],
-        unitsPrev[k + 3],
-        unitsNow[k + 2],
-        unitsNow[k + 3],
-        unitsNow[k],
-        unitsNow[k + 1],
-        hx * sign * CUT_LEAN,
-        hz * sign * CUT_LEAN,
-        height
-      )
-    }
-    // まだ刈っていない所を通った分だけ、刈りカスが出る。長い芝ほど多い
-    if (deckLift < 0.4) {
-      const newCells = coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
-      if (newCells > 0) {
-        const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)
-        emitClippings(newCells * coverage.cellSize * coverage.cellSize * length, deck)
-      }
-    }
-  }
-  unitsPrev.set(unitsNow)
-  unitsStarted = cutting
-
-  // 車輪の跡: 芝丈は変えずに、踏んだ所の芝を進行方向へ寝かせる。
-  // 刈刃は車輪より前にあるので、刈った直後の芝の上にも跡が重なる
-  wheelPositions(state, params, wheelsNow)
-  if (!tracksStarted) {
-    wheelsPrev.set(wheelsNow)
-    tracksStarted = true
-  }
-  const moved = Math.hypot(wheelsNow[0] - wheelsPrev[0], wheelsNow[1] - wheelsPrev[1])
-  if (moved > 5) {
-    // やり直しなどで位置が飛んだときは、線を引かない
-    wheelsPrev.set(wheelsNow)
-  } else if (moved >= TRACK_STEP) {
-    const sign = state.speed >= 0 ? 1 : -1
-    const dirX = Math.sin(state.heading) * sign
-    const dirZ = Math.cos(state.heading) * sign
-    for (let i = 0; i < wheelsNow.length; i += 2) {
-      const width = params.wheels[i / 2].width
-      const halfX = (Math.cos(state.heading) * width) / 2
-      const halfZ = (-Math.sin(state.heading) * width) / 2
-      mowMap.addQuad(
-        wheelsPrev[i] + halfX,
-        wheelsPrev[i + 1] + halfZ,
-        wheelsPrev[i] - halfX,
-        wheelsPrev[i + 1] - halfZ,
-        wheelsNow[i] - halfX,
-        wheelsNow[i + 1] - halfZ,
-        wheelsNow[i] + halfX,
-        wheelsNow[i + 1] + halfZ,
-        dirX,
-        dirZ,
-        MAX_GRASS_HEIGHT,
-        0.3
-      )
-    }
-    wheelsPrev.set(wheelsNow)
-  }
 }
 
 function resize(): void {
@@ -1388,13 +1509,17 @@ let logTimer = 0
 function updateReadouts(dt: number): void {
   if (dt > 0) fps += (1 / dt - fps) * 0.05
   const s = rig.settings
+  // 機体ごとの値は、乗っている機体のもの。刈った面積は全台の合計
+  const unit = rider
+  const driving = mowers.filter((m) => m.autoDrive).length
   setStatus({
-    speed: `${(sim.state.speed * 3.6).toFixed(1)} km/h`,
-    deck: sim.state.deckDown ? '下げ' : '上げ',
+    mower: unit ? `${unit.name}${unit.autoDrive ? '(自動)' : ''}` : `なし(自動 ${driving} / ${mowers.length} 台)`,
+    speed: unit ? `${(unit.state.speed * 3.6).toFixed(1)} km/h` : '-',
+    deck: unit ? (unit.state.deckDown ? '下げ' : '上げ') : '-',
     area: `${coverage.coveredArea.toFixed(0)} m²`,
-    slope: `${((terrain.slopeAt(sim.state.x, sim.state.z, 2) * 180) / Math.PI).toFixed(0)}°`,
-    altitude: `${terrain.heightAt(sim.state.x, sim.state.z).toFixed(1)} m`,
-    distance: `${sim.distance.toFixed(0)} m`,
+    slope: unit ? `${((terrain.slopeAt(unit.state.x, unit.state.z, 2) * 180) / Math.PI).toFixed(0)}°` : '-',
+    altitude: unit ? `${terrain.heightAt(unit.state.x, unit.state.z).toFixed(1)} m` : '-',
+    distance: `${(unit ? unit.distance : mowers.reduce((sum, m) => sum + m.distance, 0)).toFixed(0)} m`,
     elapsed: formatTime(sim.elapsed),
     clock: formatHour(timeSettings.hour)
   })
@@ -1403,9 +1528,11 @@ function updateReadouts(dt: number): void {
     focus: `${focusDistance.toFixed(1)} m`,
     exposure: `1/${Math.round(1 / s.shutterTime)} 秒  ISO ${s.iso}  EV ${ev100(s.fNumber, s.shutterTime, s.iso).toFixed(1)}`
   })
+  // 経路は、乗っている機体のもの
+  const shown = unit?.route
   setRouteReadout({
-    ...route.text,
-    progress: route.follower ? `${(route.follower.progress * 100).toFixed(1)}%` : '-'
+    ...(shown ? shown.text : { plot: '-', area: '-', lines: '-', cut: '-', transit: '-', time: '-' }),
+    progress: shown?.follower ? `${(shown.follower.progress * 100).toFixed(1)}%` : '-'
   })
   // 動作確認用: ?log=1 で、描画の速さをログに出す
   if (logFps && (logTimer += dt) > 2) {
@@ -1423,8 +1550,6 @@ let windTime = 0
 // タイムラプスで、次のコマまでにためておく時間
 let shotTimer = 0
 let shotPending = 0
-// タイムラプスでカメラが追う位置。機体は 1 コマごとに飛ぶので、カメラはその間をなめらかに追う
-const cameraTarget = { ...sim.state }
 const viewDirection = new Vector3()
 const scratch = new Vector3()
 /**
@@ -1432,7 +1557,11 @@ const scratch = new Vector3()
  * 描画のたびにまとめて飛ばすと、倍速が高いときやタイムラプスでは、1 回の描画の間に進んだ道のりの
  * 終わりにだけ粒が固まる。刻みごとにその時の刈刃の位置から飛ばし、刈り跡に沿って均等に並べる。
  */
-function emitClippings(volume: number, deck: { lx: number; lz: number; rx: number; rz: number }): void {
+function emitClippings(
+  unit: MowerUnit,
+  volume: number,
+  deck: { lx: number; lz: number; rx: number; rz: number }
+): void {
   if (!settings.clippings) return
   // 倍速が高いときは粒を間引く(見た目の量をおおよそ保ち、重くしない)
   const wanted = (volume * CLIPPINGS_PER_VOLUME) / Math.sqrt(sim.timeScale)
@@ -1441,7 +1570,7 @@ function emitClippings(volume: number, deck: { lx: number; lz: number; rx: numbe
   const count = Math.floor(clippingDebt)
   if (count === 0) return
   clippingDebt -= count
-  const state = sim.state
+  const state = unit.state
   const fx = Math.sin(state.heading)
   const fz = Math.cos(state.heading)
   for (let i = 0; i < count; i++) {
@@ -1520,26 +1649,24 @@ function frame(now: number): void {
   if (!timeSettings.timelapse) clippings.update(dt * Math.min(sim.timeScale, 3))
   else if (steps > 0) clippings.update(Math.min(simSeconds, 3 / timeSettings.fps))
   if (zoning.dirty) updateZoning()
-  if (route.dirty && (route.show || sim.autoDrive)) updateRoute()
+  // 経路は、自動運転の機体と、区画と経路を表示しているときの乗っている機体の分を作る。重いので 1 フレームに 1 台まで
+  const needsRoute = mowers.find((m) => m.route.dirty && (m.autoDrive || (route.show && m === rider)))
+  if (needsRoute) updateRoute(needsRoute)
   else if (plotting.dirty && route.show) updatePlots()
 
-  mower.sync(sim.state, simSeconds, terrain)
-  // カメラが追う位置。タイムラプスでは、コマごとに飛ぶ機体をなめらかに追わせる
-  const target = sim.state
-  const jump = Math.hypot(target.x - cameraTarget.x, target.z - cameraTarget.z)
-  if (timeSettings.timelapse && jump < 150) {
-    const follow = 1 - Math.exp(-dt * 6)
-    const x = cameraTarget.x + (target.x - cameraTarget.x) * follow
-    const z = cameraTarget.z + (target.z - cameraTarget.z) * follow
-    const turn = Math.atan2(Math.sin(target.heading - cameraTarget.heading), Math.cos(target.heading - cameraTarget.heading))
-    const heading = cameraTarget.heading + turn * follow
-    Object.assign(cameraTarget, target, { x, z, heading })
-  } else {
-    Object.assign(cameraTarget, target)
+  for (const unit of mowers) {
+    unit.model.sync(unit.state, simSeconds, terrain)
+    unit.followCamera(dt, timeSettings.timelapse)
   }
-  if (rig.mode === 'fixed') rig.setArmInput(input.axis(['KeyD'], ['KeyA']), input.axis(['KeyW'], ['KeyS']))
+  // 定点の視点では W / A / S / D でカメラを回す。誰にも乗っていない俯瞰では、W / A / S / D と矢印キーで見る場所を動かす
+  if (rider && rig.mode === 'fixed') rig.setArmInput(input.axis(['KeyD'], ['KeyA']), input.axis(['KeyW'], ['KeyS']))
   else rig.setArmInput(0, 0)
-  rig.update(cameraTarget, dt, terrain)
+  if (!rider) {
+    rig.setPanInput(input.axis(['KeyD', 'ArrowRight'], ['KeyA', 'ArrowLeft']), input.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']))
+  } else {
+    rig.setPanInput(0, 0)
+  }
+  rig.update(rider ? rider.cameraTarget : null, dt, terrain)
   updateViewHint()
   const exposure = rig.exposure
   // タイムラプスでは木の揺れもコマごとに進める(1 コマごとに枝葉の形が変わり、ちらちらして見える)
@@ -1550,13 +1677,16 @@ function frame(now: number): void {
   pathLine.tick(dt)
   plotOverlay.tick(dt)
   zoneOverlay.tick(dt)
-  pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
+  const riding = rider?.route.follower
+  pathLine.done = rider && riding && (rider.autoDrive || riding.segment > 0) ? riding.progress : 0
   grassBlades.update(rig.camera, bladeSettings.show)
-  // 法線マップは、読み出しで描画が少し止まるので、0.2 秒ごとに描き直す
+  // 法線マップは、読み出しで描画が少し止まるので、0.2 秒ごとに描き直す。誰にも乗っていないときは、見ている所を中心にする
   if (debugSettings.normals && (normalTimer -= dt) <= 0) {
     normalTimer = 0.2
     const view = rig.camera.getWorldDirection(scratch)
-    normalPreview.update(renderer, sim.state.x, sim.state.z, sim.state.heading, view.x, view.z)  }
+    const at = rider ? rider.state : { x: rig.focusPoint.x, z: rig.focusPoint.z, heading: 0 }
+    normalPreview.update(renderer, at.x, at.z, at.heading, view.x, view.z)
+  }
   lighting.update(renderer, exposure, rig.camera.position)
   // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
   sunGizmo.update(
