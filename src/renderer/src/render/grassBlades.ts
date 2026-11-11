@@ -41,10 +41,10 @@ export const DEFAULT_GRASS_BLADES: GrassBladeOptions = {
 const FULL_RADIUS = 12
 /** 葉を描く範囲を動かす刻み(マス)。まばらにする間隔の最大(4 マス)に合わせる */
 const PATCH_SNAP = 4
-/** カメラがこれより離れたら葉を描かない(m)。1 画素より細くなって、ちらつくだけになるため */
-const HIDE_DISTANCE = 70
-/** この距離から、葉を少しずつ低くして消していく(m) */
-const FADE_DISTANCE = 30
+/** 見ている地面までの距離(35 mm のレンズに直した値、m)がこれを超えるたびに、葉の間隔と太さを 2 倍にする */
+const LEVEL_DISTANCE = 26
+/** 段の上限(4 なら 16 倍まで) */
+const MAX_LEVEL = 4
 
 const VERTEX_HEADER = /* glsl */ `
 attribute vec2 aCell;
@@ -54,6 +54,7 @@ uniform float uHeightOrigin;
 uniform float uHeightCell;
 uniform vec2 uPatchCell;
 uniform float uSpacing;
+uniform float uBladeScale; // 離れて見るときの、葉の間隔と太さの倍率(1、2、4、…)
 uniform float uBladeWidth;
 uniform sampler2D uLengthMap;
 uniform float uLengthOrigin;
@@ -110,7 +111,7 @@ vec2 bladeCell = aCell + uPatchCell;
 float rndA = bladeHash(bladeCell);
 float rndB = bladeHash(bladeCell + 17.3);
 float rndC = bladeHash(bladeCell + 41.7);
-vec2 bladeRoot = (bladeCell + vec2(rndA, rndB)) * uSpacing;
+vec2 bladeRoot = (bladeCell + vec2(rndA, rndB)) * uSpacing * uBladeScale;
 float groundY = terrainHeight(bladeRoot);
 
 // 読む位置を葉ごとに少しずらす。刈り跡の縁で、刈られた葉と残った葉が入り混じる
@@ -171,7 +172,7 @@ float laidAngle = atan(leanDir.y, leanDir.x) + 1.5708 + (rndA - 0.5) * 0.9;
 vec2 widthDir = normalize(mix(vec2(cos(freeAngle), sin(freeAngle)), vec2(cos(laidAngle), sin(laidAngle)), laid));
 vec3 faceNormal = vec3(-widthDir.y, 0.0, widthDir.x) * (rndC > 0.5 ? 1.0 : -1.0);
 vec3 bendTilt = vec3(bladeBend.x, 0.0, bladeBend.y) * position.y;
-vec3 freeNormal = terrainNormal * (0.7 + 0.5 * position.y) + faceNormal * 0.55 - bendTilt * 0.5;
+vec3 freeNormal = terrainNormal * (0.7 + 0.5 * position.y) + faceNormal * 0.55 / uBladeScale - bendTilt * 0.5;
 // 寝た葉の表面は、倒れた向きと逆側へ傾いた上向きになる。縞の明暗はここから生まれる
 vec3 laidNormal = terrainNormal * (0.25 + sin(layAngle)) - vec3(leanDir.x, 0.0, leanDir.y) * cos(layAngle) * 0.8
   + faceNormal * 0.2;
@@ -180,7 +181,7 @@ objectNormal = normalize(mix(freeNormal, laidNormal, laid));
 
 const VERTEX_POSITION = /* glsl */ `
 float bladeT = position.y;
-vec2 bladeSide = widthDir * position.x * uBladeWidth * aWide * step(0.001, bladeHeight);
+vec2 bladeSide = widthDir * position.x * uBladeWidth * aWide * mix(1.0, uBladeScale, 0.8) * step(0.001, bladeHeight);
 // 根元は立ち気味で、先へ行くほど寝る
 float layHere = layAngle * (0.45 + 0.55 * bladeT);
 vec2 bladeOffset = bladeSide
@@ -227,6 +228,8 @@ export class GrassBlades {
   readonly mesh: Mesh
   private readonly patchCell = new Vector2()
   private readonly geometry: InstancedBufferGeometry
+  private readonly scale = { value: 1 }
+  private level = 0
   private readonly forward = new Vector3()
 
   constructor(
@@ -273,6 +276,7 @@ export class GrassBlades {
       uHeightCell: { value: terrain.options.cell },
       uPatchCell: { value: this.patchCell },
       uSpacing: { value: spacing },
+      uBladeScale: this.scale,
       uBladeWidth: { value: options.bladeWidth }
     }
 
@@ -312,7 +316,6 @@ export class GrassBlades {
   setRadius(radius: number): void {
     const spacing = this.options.spacing
     this.options.radius = radius
-    this.ground.uBladeRadius.value = radius
     const reach = Math.ceil(radius / spacing)
     const full = FULL_RADIUS / spacing
     const cells: number[] = []
@@ -341,8 +344,8 @@ export class GrassBlades {
 
   /**
    * 毎フレーム呼ぶ。葉を描く範囲を、カメラが見ている地面に合わせる。
-   * 範囲の中心は、視線が地面に当たる所。ただし遠くを見ているときは、カメラの手前
-   * (範囲の半径の 0.75 倍だけ前)に置く。近くの草ほど大きく写り、葉が要るため
+   * 離れて見るほど、葉の間隔と太さと範囲をまとめて大きくする(2 倍、4 倍、…)。
+   * 葉の枚数はほぼ変わらないので、俯瞰のように遠くから広く見るときも、同じ重さで芝の質感が出る
    */
   update(camera: PerspectiveCamera, enabled: boolean): void {
     const position = camera.position
@@ -351,21 +354,32 @@ export class GrassBlades {
     const height = Math.max(position.y - this.terrain.heightAt(position.x, position.z), 0.1)
     // 視線が地面(カメラの真下と同じ高さの水平面とみなす)に当たるまでの、水平の距離
     const reach = this.forward.y < -1e-3 ? (height * flat) / -this.forward.y : Infinity
-    const ahead = Math.min(reach, this.options.radius * 0.75)
+
+    // 見ている地面までの距離を、35 mm のレンズで見たときの距離に直す(望遠ほど大きく写るので、近いのと同じ)
+    const sight = Math.hypot(Math.min(reach, 4000), height) * (35 / camera.getFocalLength())
+    // 段を決める。境目で行き来してちらつかないよう、今の段から動くには 15% の余裕を越える必要がある
+    let level = this.level
+    while (level < MAX_LEVEL && sight > LEVEL_DISTANCE * 2 ** level * 1.15) level++
+    while (level > 0 && sight < LEVEL_DISTANCE * 2 ** (level - 1) * 0.85) level--
+    this.level = level
+    const scale = 2 ** level
+    const spacing = this.options.spacing * scale
+    const radius = this.options.radius * scale
+    this.scale.value = scale
+    this.ground.uBladeRadius.value = radius
+
+    // 範囲の中心は、視線が地面に当たる所。遠くを見ているときは、カメラの少し前に置く。
+    // 葉が密なのは中心のまわり(FULL_RADIUS まで)なので、中心をカメラから離しすぎると、手前の葉がまばらになる。
+    // 描く距離(radius)を伸ばしても中心は動かさず、外側へ広がるだけにする
+    const ahead = Math.min(reach, FULL_RADIUS * scale * 0.75, radius * 0.75)
     const cx = position.x + (flat > 1e-4 ? (this.forward.x / flat) * ahead : 0)
     const cz = position.z + (flat > 1e-4 ? (this.forward.z / flat) * ahead : 0)
-
-    // カメラから範囲の中心までが遠いと、葉は 1 画素より細くなる。少しずつ低くして消す
-    const distance = Math.hypot(ahead, position.y - this.terrain.heightAt(cx, cz))
-    const visible = enabled && distance < HIDE_DISTANCE
-    this.mesh.visible = visible
-    const t = Math.min(Math.max((distance - FADE_DISTANCE) / (HIDE_DISTANCE - FADE_DISTANCE), 0), 1)
-    this.ground.uBladeAmount.value = visible ? 1 - t * t * (3 - 2 * t) : 0
+    this.mesh.visible = enabled
+    this.ground.uBladeAmount.value = enabled ? 1 : 0
     this.ground.uBladeCenter.value.set(cx, cz)
     this.patchCell.set(
-      Math.floor(cx / this.options.spacing / PATCH_SNAP) * PATCH_SNAP,
-      Math.floor(cz / this.options.spacing / PATCH_SNAP) * PATCH_SNAP
+      Math.floor(cx / spacing / PATCH_SNAP) * PATCH_SNAP,
+      Math.floor(cz / spacing / PATCH_SNAP) * PATCH_SNAP
     )
   }
-
 }
