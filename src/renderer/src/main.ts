@@ -47,6 +47,7 @@ import {
 } from './sim/zoning'
 import { FAIRWAY_MOWER, minTurnRadius, type VehicleInput } from './sim/vehicle'
 import { MowerUnit, type StepContext } from './mowerUnit'
+import { initScreenRecorder } from './screenRecorder'
 import { SunGizmo } from './sunGizmo'
 import { addCheck, addPanelToggle, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
 
@@ -1300,6 +1301,10 @@ const toggleHelp = setupHelp([
     title: 'その他',
     items: [
       { keys: ['L', '+', '左ドラッグ'], text: '太陽の向きを変える(左右で方位、上下で高度)' },
+      { keys: ['F12'], text: 'スクリーンショット(画面の画素のまま)' },
+      { keys: ['Shift', '+', 'F12'], text: 'スクリーンショット(表示倍率 100% の大きさ)' },
+      { keys: ['Ctrl', '+', 'F12'], text: '録画を始める、止める' },
+      { keys: ['F11'], text: '動画用サイズ(1920×1080)に切り替える、戻す' },
       { keys: [','], text: '設定ウインドウを開く、閉じる' },
       { keys: ['?'], text: 'この一覧を開く、閉じる' }
     ]
@@ -1560,12 +1565,67 @@ const toggleSettings = setupSettings(
         { type: 'check', key: 'showHint', label: '操作の案内を表示', title: '画面の上に、操作の案内を出します' },
         { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' }
       ]
+    },
+    {
+      title: '録画',
+      items: [
+        {
+          type: 'choice',
+          key: 'recordingFps',
+          label: '録画のコマ数',
+          title:
+            'Ctrl+F12 で録画するときの毎秒のコマ数。60 はなめらかですが、描画と書き出しが重なって重くなり、追いつかないとコマが落ちます。F11 で、ウィンドウを録画用の 1920×1080(表示倍率 100% と同じ構図)に切り替え、もう一度押すと戻ります(録画中は切り替えられません)',
+          options: [
+            { value: 30, label: '30' },
+            { value: 60, label: '60' }
+          ]
+        }
+      ]
     }
   ],
   applySetting
 )
 for (const key of Object.keys(settings) as (keyof AppSettings)[]) applySetting(key)
 input.onPress('Comma', toggleSettings)
+
+// スクリーンショット(F12、Shift+F12)と録画(Ctrl+F12)の保存の通知。キーはメインプロセスが受け取る
+const SAVED_TOAST_MS = 6000
+const showSavedToast = ((): ((kind: 'screenshot' | 'recording', filePath: string | null) => void) => {
+  const toast = byId('screenshot-toast')
+  const open = byId<HTMLButtonElement>('screenshot-toast-open')
+  const dialog = byId<HTMLDialogElement>('settings')
+  let savedPath: string | null = null
+  let timer = 0
+  const hide = (): void => {
+    window.clearTimeout(timer)
+    toast.hidden = true
+  }
+  const name = { screenshot: 'スクリーンショット', recording: '録画' }
+  open.addEventListener('click', () => {
+    if (savedPath) void window.lawnApi?.revealScreenshot(savedPath)
+    hide()
+    open.blur()
+  })
+  byId('screenshot-toast-close').addEventListener('click', hide)
+  dialog.addEventListener('close', () => document.body.append(toast))
+  return (kind, filePath) => {
+    savedPath = filePath
+    byId('screenshot-toast-title').textContent = `${name[kind]}を${filePath ? '保存しました' : '保存できませんでした'}`
+    byId('screenshot-toast-file').textContent = filePath ? (filePath.split(/[\\/]/).pop() ?? '') : ''
+    byId('screenshot-toast-hint').textContent = filePath ? 'クリックで保存先を開く' : ''
+    open.disabled = !filePath
+    // 設定ウインドウを開いている間は、その外の要素がクリックを受けないので中へ移す
+    ;(dialog.open ? dialog : document.body).append(toast)
+    toast.hidden = false
+    window.clearTimeout(timer)
+    timer = window.setTimeout(hide, SAVED_TOAST_MS)
+  }
+})()
+window.lawnApi?.onScreenshot((filePath) => showSavedToast('screenshot', filePath))
+initScreenRecorder({
+  fps: () => settings.recordingFps,
+  onSaved: (filePath) => showSavedToast('recording', filePath)
+})
 if (query.get('settings') === '1') toggleSettings()
 input.onPress('Slash', toggleHelp)
 TIME_SCALES.forEach((scale, i) => {

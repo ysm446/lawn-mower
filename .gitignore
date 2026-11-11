@@ -6,3 +6,5 @@ __pycache__/
 *.log
 *.blend1
 /screenshots/
+# スクリーンショットと録画の保存先
+/data/

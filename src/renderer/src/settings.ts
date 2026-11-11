@@ -21,6 +21,8 @@ export interface AppSettings {
   clippings: boolean
   /** 画面の上の、操作の案内を出すか */
   showHint: boolean
+  /** 録画(Ctrl+F12)の毎秒のコマ数(30 か 60) */
+  recordingFps: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -31,7 +33,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shadowDistance: 220,
   shadowMapSize: 2048,
   clippings: true,
-  showHint: true
+  showHint: true,
+  recordingFps: 30
 }
 
 const STORAGE_KEY = 'lawn-mower-settings'
