@@ -49,7 +49,18 @@ import { FAIRWAY_MOWER, minTurnRadius, type VehicleInput } from './sim/vehicle'
 import { MowerUnit, type StepContext } from './mowerUnit'
 import { initScreenRecorder } from './screenRecorder'
 import { SunGizmo } from './sunGizmo'
-import { addCheck, addPanelToggle, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
+import {
+  addCheck,
+  addPanelToggle,
+  addReadout,
+  addSlider,
+  addSwitch,
+  byId,
+  restorePanelValues,
+  setupHelp,
+  stopsSlider,
+  type Sync
+} from './ui'
 
 // 単位はすべて実寸(1 = 1 m)
 const FIELD_SIZE = 512
@@ -731,8 +742,9 @@ syncs.push(
       rig.settings.focalLength = Math.round(FOCAL_MIN * Math.exp(t * focalRange))
     },
     format: (t) => `${Math.round(FOCAL_MIN * Math.exp(t * focalRange))} mm`,
-    // 視点ごとに初期値が違う
-    defaultValue: () => Math.log(rig.defaultFocalLength / FOCAL_MIN) / focalRange
+    // 視点ごとに初期値が違う(視点を切り替えると初期値に戻るので、保存しない)
+    defaultValue: () => Math.log(rig.defaultFocalLength / FOCAL_MIN) / focalRange,
+    persist: false
   }),
   addSlider(
     cameraFields,
@@ -820,7 +832,10 @@ syncs.push(
     'タイムラプス',
     '一定の間隔で撮った写真をつなげたような見え方にします。時間をまとめて進め、機体や影が 1 コマごとに飛びます。視点はなめらかに動きます。倍速が低いときは 32 倍に上げます(T)',
     () => timeSettings.timelapse,
-    setTimelapse
+    setTimelapse,
+    undefined,
+    // その場の状態なので保存しない(T キーでも切り替える)
+    false
   ),
   addSlider(timeFields, {
     label: 'コマ数',
@@ -845,7 +860,9 @@ syncs.push(
       timeSettings.hour = v
       timeSettings.sunFollowsClock = true
     },
-    format: formatHour
+    format: formatHour,
+    // 時刻は進んでいくので保存しない(起動するといつも朝から)
+    persist: false
   }),
   addCheck(
     timeFields,
@@ -872,7 +889,9 @@ syncs.push(
       timeSettings.sunFollowsClock = false
       sunGizmo.touch()
     },
-    format: (v) => `${v.toFixed(0)}°`
+    format: (v) => `${v.toFixed(0)}°`,
+    // 「時刻で太陽を動かす」がオンなら時刻から決まるので、オフのときだけ戻す
+    persist: () => !timeSettings.sunFollowsClock
   }),
   addSlider(lightFields, {
     label: '太陽の方位',
@@ -885,7 +904,9 @@ syncs.push(
       timeSettings.sunFollowsClock = false
       sunGizmo.touch()
     },
-    format: (v) => `${v.toFixed(0)}°`
+    format: (v) => `${v.toFixed(0)}°`,
+    // 「時刻で太陽を動かす」がオンなら時刻から決まるので、オフのときだけ戻す
+    persist: () => !timeSettings.sunFollowsClock
   }),
   addSlider(lightFields, {
     label: '雲',
@@ -960,7 +981,10 @@ syncs.push(
     (v) => {
       debugSettings.normals = v
       normalPanel.hidden = !v
-    }
+    },
+    undefined,
+    // 動作確認用なので保存しない
+    false
   ),
   addSlider(grassFields, {
     label: '法線の強調',
@@ -1659,6 +1683,9 @@ TIME_SCALES.forEach((scale, i) => {
     syncUi()
   })
 })
+// 右の列のパネルの値を、前回の値に戻す(次の起動のために保存もする)。
+// 起動時の指定(動作確認用)があるときは、その値で確かめられるよう、戻しも保存もしない(マップの指定だけは例外)
+if ([...query.keys()].every((key) => key === 'map')) restorePanelValues()
 syncUi()
 
 // ------------------------------------------------ シミュレーション

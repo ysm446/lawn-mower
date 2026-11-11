@@ -11,6 +11,86 @@ export function byId<T extends HTMLElement>(id: string): T {
 
 let fieldSerial = 0
 
+// ------------------------------------------------ 右の列のパネルの値の保存
+// 右の列(#right-stack)のスライダーとチェックは、作ったときに自動で登録し、値を保存して次の起動で戻す。
+// 設定ウインドウの項目は settings.ts が別に保存するので、ここでは扱わない
+
+const PANEL_STORAGE_KEY = 'lawn-mower-panels'
+
+interface PanelValue {
+  key: string
+  get: () => unknown
+  set: (value: unknown) => void
+  /** 戻すかどうか(戻すときに判断する)。保存はいつもする */
+  restore: () => boolean
+}
+
+const panelValues: PanelValue[] = []
+let saveTimer = 0
+/** 保存を有効にしたか(restorePanelValues で有効にする) */
+let persistEnabled = false
+
+/** パネルの値を保存しない(false)、または戻す条件(関数) */
+export type Persist = boolean | (() => boolean)
+
+function registerPanelValue(
+  parent: HTMLElement,
+  label: string,
+  get: () => unknown,
+  set: (value: unknown) => void,
+  persist: Persist | undefined
+): void {
+  if (persist === false || !parent.closest('#right-stack')) return
+  panelValues.push({
+    key: `${parent.id}/${label}`,
+    get,
+    set,
+    restore: typeof persist === 'function' ? persist : () => true
+  })
+}
+
+/** 右の列のパネルの値を保存する */
+export function savePanelValues(): void {
+  window.clearTimeout(saveTimer)
+  if (!persistEnabled) return
+  const values: Record<string, unknown> = {}
+  for (const item of panelValues) values[item.key] = item.get()
+  try {
+    window.localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(values))
+  } catch {
+    // 保存できなくても、動作は続ける
+  }
+}
+
+/** 操作で値が変わったとき。続けて動かしている間は、まとめて少し後に保存する */
+function panelValueChanged(): void {
+  if (!persistEnabled) return
+  window.clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(savePanelValues, 500)
+}
+
+/**
+ * 保存しておいた右の列のパネルの値を戻す。部品をすべて作ったあとに 1 回呼ぶ。
+ * 部品を作った順に、その部品の set を通して戻す(値が変わったときと同じ処理が走る)。
+ * 型の合わない値は無視する。閉じるときにも保存するよう登録する
+ */
+export function restorePanelValues(): void {
+  persistEnabled = true
+  let saved: Record<string, unknown> = {}
+  try {
+    saved = JSON.parse(window.localStorage.getItem(PANEL_STORAGE_KEY) ?? '{}') as Record<string, unknown>
+  } catch {
+    saved = {}
+  }
+  for (const item of panelValues) {
+    const value = saved[item.key]
+    if (value === undefined || typeof value !== typeof item.get() || !item.restore()) continue
+    item.set(value)
+  }
+  // 太陽の向きのドラッグなど、パネルの外から変えた値も、閉じるときに保存する
+  window.addEventListener('beforeunload', savePanelValues)
+}
+
 export interface SliderSpec {
   label: string
   title?: string
@@ -22,6 +102,8 @@ export interface SliderSpec {
   format: (value: number) => string
   /** 既定値。省くと、作った時点の値を既定値にする。状況で変わるものは関数で渡す */
   defaultValue?: () => number
+  /** 右の列のパネルで、値を保存して次の起動で戻すか(既定は保存する)。関数なら、戻すときの条件 */
+  persist?: Persist
 }
 
 const RESET_ICON =
@@ -67,8 +149,10 @@ export function addSlider(parent: HTMLElement, spec: SliderSpec): Sync {
   const reset = resetButton(spec.label, () => {
     spec.set(defaultValue())
     sync()
+    panelValueChanged()
   })
   parent.append(label, row, reset)
+  registerPanelValue(parent, spec.label, spec.get, (v) => spec.set(v as number), spec.persist)
 
   const show = (value: number): void => {
     const fill = ((value - spec.min) / (spec.max - spec.min)) * 100
@@ -79,6 +163,7 @@ export function addSlider(parent: HTMLElement, spec: SliderSpec): Sync {
   input.addEventListener('input', () => {
     spec.set(Number(input.value))
     show(Number(input.value))
+    panelValueChanged()
   })
   const sync = (): void => {
     const value = spec.get()
@@ -124,7 +209,9 @@ export function addCheck(
   title: string,
   get: () => boolean,
   set: (value: boolean) => void,
-  defaultValue?: boolean
+  defaultValue?: boolean,
+  /** 右の列のパネルで、値を保存して次の起動で戻すか(既定は保存する)。関数なら、戻すときの条件 */
+  persist?: Persist
 ): Sync {
   const row = document.createElement('label')
   row.className = 'check-row'
@@ -137,12 +224,15 @@ export function addCheck(
   const reset = resetButton(label, () => {
     set(initial)
     sync()
+    panelValueChanged()
   })
   parent.append(row, reset)
+  registerPanelValue(parent, label, get, (v) => set(v as boolean), persist)
   input.addEventListener('change', () => {
     set(input.checked)
     reset.disabled = input.checked === initial
     input.blur() // Space などのキー操作がチェックに取られないようにする
+    panelValueChanged()
   })
   const sync = (): void => {
     input.checked = get()
