@@ -63,7 +63,7 @@ void main() {
   // 帯の両脇では、刈高から「刈っていない高さ」へなだらかに上げる。
   // 芝丈は低い方だけが残る(MIN 合成)ので、縁が階段状にならず、なめらかにつながる
   float t = smoothstep(vFeather.y, 1.0, abs(vFeather.x));
-  gl_FragColor = vec4(vStamp.xy * 0.5 + 0.5, uFreshness, mix(vStamp.z, 0.6, t));
+  gl_FragColor = vec4(vStamp.xy * 0.5 + 0.5, uFreshness, mix(vStamp.z, 1.0, t));
 }
 `
 

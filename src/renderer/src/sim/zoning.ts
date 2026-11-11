@@ -256,12 +256,14 @@ function absorbSmallRegions(zones: Uint8Array, n: number, minCells: number): boo
 
 /**
  * 区分けを行う。startIx、startIz は出発点(芝刈り機の置き場所)の格子点。
+ * blocked は、入れない所(樹木など)を 1 にした格子。
  */
 export function computeZoning(
   grid: HeightGrid,
   options: ZoningOptions,
   startIx: number,
-  startIz: number
+  startIz: number,
+  blocked?: Uint8Array
 ): ZoningResult {
   const { samples: n, cell } = grid
   const slopeDeg = computeSlopeDeg(grid, options.smoothRadius)
@@ -276,12 +278,21 @@ export function computeZoning(
 
   zones = majorityFilter(zones, n, Math.round(options.majorityRadius / cell))
 
+  // 樹木などで入れない所は、勾配によらず「刈らない」にする
+  const applyBlocked = (): void => {
+    if (!blocked) return
+    for (let i = 0; i < zones.length; i++) if (blocked[i] === 1) zones[i] = ZONE_NONE
+  }
+  applyBlocked()
+
   const cellArea = cell * cell
   const minCells = options.minArea / cellArea
   // 吸収によって隣どうしがつながり、新たに狭い領域が残ることがあるので数回くり返す
   for (let i = 0; i < 4; i++) {
     if (!absorbSmallRegions(zones, n, minCells)) break
   }
+  // 1 本だけ立つ木のような狭い障害物は、吸収で消えてしまうので、最後にもう一度入れ直す
+  applyBlocked()
 
   const { labels, zone, size } = labelRegions(zones, n)
   const sx = Math.min(Math.max(Math.round(startIx), 0), n - 1)

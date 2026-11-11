@@ -123,7 +123,8 @@ export function addCheck(
   label: string,
   title: string,
   get: () => boolean,
-  set: (value: boolean) => void
+  set: (value: boolean) => void,
+  defaultValue?: boolean
 ): Sync {
   const row = document.createElement('label')
   row.className = 'check-row'
@@ -131,7 +132,8 @@ export function addCheck(
   const input = document.createElement('input')
   input.type = 'checkbox'
   row.append(input, label)
-  const initial = get()
+  // 既定値。省くと、作った時点の値を既定値にする
+  const initial = defaultValue ?? get()
   const reset = resetButton(label, () => {
     set(initial)
     sync()
@@ -145,6 +147,41 @@ export function addCheck(
   const sync = (): void => {
     input.checked = get()
     reset.disabled = input.checked === initial
+  }
+  sync()
+  return sync
+}
+
+/** いくつかの選択肢から 1 つを選ぶ行(ラベル、横に並んだボタン、既定に戻すボタン) */
+export function addChoice<T>(
+  parent: HTMLElement,
+  label: string,
+  title: string,
+  options: SwitchOption<T>[],
+  get: () => T,
+  set: (value: T) => void,
+  defaultValue: T
+): Sync {
+  const name = document.createElement('label')
+  name.textContent = label
+  name.title = title
+  const group = document.createElement('div')
+  group.className = 'switch'
+  group.role = 'group'
+  group.title = title
+  group.setAttribute('aria-label', label)
+  const reset = resetButton(label, () => {
+    set(defaultValue)
+    sync()
+  })
+  parent.append(name, group, reset)
+  const syncButtons = addSwitch(group, options, get, (value) => {
+    set(value)
+    reset.disabled = value === defaultValue
+  })
+  const sync = (): void => {
+    syncButtons()
+    reset.disabled = get() === defaultValue
   }
   sync()
   return sync

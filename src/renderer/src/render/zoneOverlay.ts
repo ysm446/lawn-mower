@@ -50,7 +50,9 @@ const OUTLINE_WIDTH = 3.5
 /** 輪郭線をならす回数。多いほどなめらかで、細かな出入りが消える */
 const OUTLINE_SMOOTHING = 6
 /** 塗りの三角形の辺の長さの上限(m)。地形に沿わせ、グラデーションをなめらかにする細かさ */
-const MAX_TRIANGLE_EDGE = 3
+const MAX_TRIANGLE_EDGE = 4
+/** 塗りの頂点の値の数の上限。これを超えたら、それ以上は細かく分けない(固まらないための歯止め) */
+const MAX_FILL_VALUES = 3_000_000
 
 const FILL_VS = /* glsl */ `
 attribute float aEdge;  // 輪郭までの距離(m)
@@ -124,7 +126,7 @@ export class ZoneOverlay {
   }
 
   /** 区分けの結果を表示に反映する */
-  update(result: ZoningResult): void {
+  update(result: ZoningResult, blocked?: Uint8Array): void {
     const { zones, labels, regions, samples: n } = result
     const { cell } = this.terrain.options
     const origin = this.terrain.origin
@@ -143,8 +145,11 @@ export class ZoneOverlay {
       let any = false
       for (let i = 0; i < zones.length; i++) {
         const zone = zones[i]
+        // 樹木で入れない所は塗らない(木が立っているので、見れば分かる)
         const k =
-          zone === ZONE_NONE
+          blocked && blocked[i] === 1
+            ? 0
+            : zone === ZONE_NONE
             ? KIND_NONE
             : zone === ZONE_SLOPE
               ? KIND_SLOPE
@@ -182,22 +187,32 @@ export class ZoneOverlay {
         widths.push(width)
         colors.push(color.r, color.g, color.b)
       }
-      // 三角形を、地形に沿う細かさになるまで 4 つに分けていく
+      // 三角形を、地形に沿う細かさになるまで分けていく。いちばん長い辺の中点で 2 つに分ける。
+      // (4 つに分ける方法だと、多角形を三角形に分けたときにできる細長い三角形で、数が爆発的に増える)
       const subdivide = (a: Vector2, b: Vector2, c: Vector2, depth: number): void => {
-        const longest = Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a))
-        if (longest <= MAX_TRIANGLE_EDGE || depth > 7) {
+        const ab = a.distanceTo(b)
+        const bc = b.distanceTo(c)
+        const ca = c.distanceTo(a)
+        const longest = Math.max(ab, bc, ca)
+        if (longest <= MAX_TRIANGLE_EDGE || depth > 24 || positions.length > MAX_FILL_VALUES) {
           pushVertex(a.x, a.y)
           pushVertex(b.x, b.y)
           pushVertex(c.x, c.y)
           return
         }
-        const ab = a.clone().add(b).multiplyScalar(0.5)
-        const bc = b.clone().add(c).multiplyScalar(0.5)
-        const ca = c.clone().add(a).multiplyScalar(0.5)
-        subdivide(a, ab, ca, depth + 1)
-        subdivide(ab, b, bc, depth + 1)
-        subdivide(ca, bc, c, depth + 1)
-        subdivide(ab, bc, ca, depth + 1)
+        if (longest === ab) {
+          const m = a.clone().add(b).multiplyScalar(0.5)
+          subdivide(a, m, c, depth + 1)
+          subdivide(m, b, c, depth + 1)
+        } else if (longest === bc) {
+          const m = b.clone().add(c).multiplyScalar(0.5)
+          subdivide(a, b, m, depth + 1)
+          subdivide(a, m, c, depth + 1)
+        } else {
+          const m = c.clone().add(a).multiplyScalar(0.5)
+          subdivide(a, b, m, depth + 1)
+          subdivide(m, b, c, depth + 1)
+        }
       }
 
       // 格子に沿った輪郭は斜めの所が階段状になるので、ならしてから使う

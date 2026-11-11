@@ -1,0 +1,206 @@
+// アプリの設定。設定ウインドウ(右上の歯車、または , キー)で変え、次の起動にも引き継ぐ。
+// 設定ウインドウは、タブで分けたセクションに項目を並べる(weather-globe の設定ダイアログと同じ作り)。
+// 項目を足すときは、AppSettings と DEFAULT_SETTINGS に足し、main.ts の setupSettings に 1 行足す。
+
+import { addCheck, addChoice, addSlider, byId, type Sync } from './ui'
+
+export interface AppSettings {
+  /** 描画の回数の上限(1 秒あたり)。0 は制限なし(画面の更新に合わせる) */
+  fpsLimit: number
+  /** 描画の細かさの上限(画面の 1 画素あたりに描く画素の数の、縦横の倍率) */
+  pixelRatio: number
+  /** 左上に fps を出すか */
+  showFps: boolean
+  /** 芝の葉を描く距離(m)。カメラが見ている地面のまわり、この半径まで葉を描く */
+  grassDistance: number
+  /** 影を描く距離(m) */
+  shadowDistance: number
+  /** 影の地図の一辺(画素)。大きいほど影の縁が細かい */
+  shadowMapSize: number
+  /** 刈りカスの粒を描くか */
+  clippings: boolean
+  /** 画面の上の、操作の案内を出すか */
+  showHint: boolean
+}
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  fpsLimit: 0,
+  pixelRatio: 2,
+  showFps: true,
+  grassDistance: 20,
+  shadowDistance: 220,
+  shadowMapSize: 2048,
+  clippings: true,
+  showHint: true
+}
+
+const STORAGE_KEY = 'lawn-mower-settings'
+
+/** 保存してある設定を読む。無い項目や型の合わない項目は、既定値にする */
+export function loadSettings(): AppSettings {
+  const settings = { ...DEFAULT_SETTINGS }
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '{}') as Record<string, unknown>
+    for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
+      if (typeof saved[key] === typeof DEFAULT_SETTINGS[key]) {
+        ;(settings as unknown as Record<string, unknown>)[key] = saved[key]
+      }
+    }
+  } catch {
+    // 読めないときは既定値のまま使う
+  }
+  return settings
+}
+
+export function saveSettings(settings: AppSettings): void {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // 保存できなくても、動作は続ける
+  }
+}
+
+type NumberKey = { [K in keyof AppSettings]: AppSettings[K] extends number ? K : never }[keyof AppSettings]
+type BooleanKey = { [K in keyof AppSettings]: AppSettings[K] extends boolean ? K : never }[keyof AppSettings]
+
+/** 設定ウインドウの 1 項目 */
+export type SettingItem =
+  | {
+      type: 'choice'
+      key: NumberKey
+      label: string
+      title: string
+      options: { value: number; label: string }[]
+    }
+  | {
+      type: 'slider'
+      key: NumberKey
+      label: string
+      title: string
+      min: number
+      max: number
+      step: number
+      format: (value: number) => string
+    }
+  | { type: 'check'; key: BooleanKey; label: string; title: string }
+
+export interface SettingSection {
+  title: string
+  items: SettingItem[]
+}
+
+/**
+ * 設定ウインドウを作る。settings を書き換え、変わるたびに保存して onChange を呼ぶ。
+ * 返す関数で開け閉めする
+ */
+export function setupSettings(
+  settings: AppSettings,
+  sections: SettingSection[],
+  onChange: (key: keyof AppSettings) => void
+): () => void {
+  const dialog = byId<HTMLDialogElement>('settings')
+  const tabs = byId('settings-tabs')
+  const body = byId('settings-body')
+  const syncs: Sync[] = []
+  const changed = (key: keyof AppSettings): void => {
+    saveSettings(settings)
+    onChange(key)
+  }
+
+  const buttons: HTMLButtonElement[] = []
+  const panels: HTMLElement[] = []
+  const select = (index: number): void => {
+    buttons.forEach((button, i) => button.setAttribute('aria-selected', String(i === index)))
+    panels.forEach((panel, i) => (panel.hidden = i !== index))
+  }
+  sections.forEach((section, index) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.role = 'tab'
+    button.textContent = section.title
+    button.addEventListener('click', () => select(index))
+    tabs.append(button)
+    buttons.push(button)
+
+    const panel = document.createElement('div')
+    panel.className = 'field-list'
+    panel.role = 'tabpanel'
+    for (const item of section.items) {
+      if (item.type === 'choice') {
+        syncs.push(
+          addChoice(
+            panel,
+            item.label,
+            item.title,
+            item.options,
+            () => settings[item.key],
+            (v) => {
+              settings[item.key] = v
+              changed(item.key)
+            },
+            DEFAULT_SETTINGS[item.key]
+          )
+        )
+      } else if (item.type === 'slider') {
+        syncs.push(
+          addSlider(panel, {
+            label: item.label,
+            title: item.title,
+            min: item.min,
+            max: item.max,
+            step: item.step,
+            get: () => settings[item.key],
+            set: (v) => {
+              settings[item.key] = v
+              changed(item.key)
+            },
+            format: item.format,
+            defaultValue: () => DEFAULT_SETTINGS[item.key]
+          })
+        )
+      } else {
+        syncs.push(
+          addCheck(
+            panel,
+            item.label,
+            item.title,
+            () => settings[item.key],
+            (v) => {
+              settings[item.key] = v
+              changed(item.key)
+            },
+            DEFAULT_SETTINGS[item.key]
+          )
+        )
+      }
+    }
+    body.append(panel)
+    panels.push(panel)
+  })
+  select(0)
+
+  byId('settings-reset-all').addEventListener('click', () => {
+    for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
+      ;(settings as unknown as Record<string, unknown>)[key] = DEFAULT_SETTINGS[key]
+      onChange(key)
+    }
+    saveSettings(settings)
+    for (const sync of syncs) sync()
+  })
+
+  const toggle = (): void => {
+    if (dialog.open) dialog.close()
+    else dialog.showModal()
+  }
+  byId('open-settings').addEventListener('click', toggle)
+  byId('close-settings').addEventListener('click', () => dialog.close())
+  // ウインドウの外側を押したら閉じる
+  dialog.addEventListener('click', (e) => {
+    if (e.target !== dialog) return
+    const r = dialog.getBoundingClientRect()
+    const inside =
+      e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
+    if (!inside) dialog.close()
+  })
+  return toggle
+}

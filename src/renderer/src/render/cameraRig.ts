@@ -22,21 +22,23 @@ const CHASE_ELEVATION = Math.atan2(CHASE_UP, CHASE_BACK)
 /** ドラッグをやめてから、背後に戻り始めるまでの時間(秒) */
 const CHASE_RETURN_DELAY = 2
 
-export type CameraMode = 'chase' | 'orbit' | 'top'
+export type CameraMode = 'chase' | 'orbit' | 'top' | 'fixed'
 
-export const CAMERA_MODES: CameraMode[] = ['chase', 'orbit', 'top']
+export const CAMERA_MODES: CameraMode[] = ['chase', 'orbit', 'top', 'fixed']
 
 export const CAMERA_MODE_LABELS: Record<CameraMode, string> = {
   chase: '追従',
   orbit: 'ドローン',
-  top: '俯瞰'
+  top: '俯瞰',
+  fixed: '定点'
 }
 
 /** 視点ごとの焦点距離の初期値(mm) */
 const MODE_FOCAL_LENGTH: Record<CameraMode, number> = {
   chase: 28,
   orbit: 50,
-  top: 85
+  top: 85,
+  fixed: 50
 }
 
 export class CameraRig {
@@ -92,7 +94,7 @@ export class CameraRig {
     domElement.addEventListener(
       'wheel',
       (e) => {
-        if (this.mode === 'orbit') return
+        if (this.mode === 'orbit' || this.mode === 'fixed') return
         e.preventDefault()
         const factor = Math.exp(e.deltaY * 0.0012)
         if (this.mode === 'chase') {
@@ -119,7 +121,9 @@ export class CameraRig {
   setMode(mode: CameraMode): void {
     this.mode = mode
     this.settings.focalLength = MODE_FOCAL_LENGTH[mode]
-    this.controls.enabled = mode === 'orbit'
+    // 定点では、機体を追わずにその場に据える。左ドラッグで見回し、右ドラッグで位置を動かせる
+    this.controls.enabled = mode === 'orbit' || mode === 'fixed'
+    this.controls.enablePan = mode === 'fixed'
     this.chaseYaw = 0
     this.chasePitch = 0
     this.chaseDragging = false
@@ -191,6 +195,16 @@ export class CameraRig {
         this.tmp.copy(this.focus).sub(this.lastFocus)
         cam.position.add(this.tmp)
         this.controls.target.add(this.tmp)
+      }
+      this.controls.update()
+      this.keepAboveGround(terrain)
+    } else if (this.mode === 'fixed') {
+      // 切り替えた時点のカメラの位置に据え、機体のいた所を見る。その後は機体を追わない
+      if (!this.initialized) {
+        if (cam.position.lengthSq() === 0) {
+          cam.position.set(this.focus.x - 30, this.focus.y + 18, this.focus.z - 36)
+        }
+        this.controls.target.copy(this.focus)
       }
       this.controls.update()
       this.keepAboveGround(terrain)

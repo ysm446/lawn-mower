@@ -3,6 +3,16 @@
 // 中央の範囲は一定間隔の格子(高さマップ)として持ち、走行と区分けはこの格子を使う。
 // 格子の外は式から直接求める(遠景の山並み用)。
 
+/** 地形の形の調整。マップごとに変える */
+export interface TerrainShape {
+  /** 丘の起伏の倍率(1 が基準。小さいほど平ら) */
+  hillScale: number
+  /** 遠景の山並みの高さの倍率 */
+  mountainScale: number
+}
+
+export const DEFAULT_SHAPE: TerrainShape = { hillScale: 1, mountainScale: 1 }
+
 export interface TerrainOptions {
   /** 地形を決めるシード値。同じ値なら同じ地形になる */
   seed: number
@@ -10,6 +20,8 @@ export interface TerrainOptions {
   size: number
   /** 格子の間隔(m) */
   cell: number
+  /** 地形の形の調整。省くと基準の丘陵 */
+  shape?: TerrainShape
 }
 
 export const DEFAULT_TERRAIN: TerrainOptions = {
@@ -69,7 +81,12 @@ const HILL_OCTAVES: ReadonlyArray<readonly [number, number]> = [
 ]
 
 /** 式から直接求めた高さ。どこでも呼べる */
-export function terrainHeight(x: number, z: number, seed: number): number {
+export function terrainHeight(
+  x: number,
+  z: number,
+  seed: number,
+  shape: TerrainShape = DEFAULT_SHAPE
+): number {
   let hills = 0
   for (let i = 0; i < HILL_OCTAVES.length; i++) {
     const [wavelength, amplitude] = HILL_OCTAVES[i]
@@ -77,13 +94,14 @@ export function terrainHeight(x: number, z: number, seed: number): number {
   }
   // 起伏の大きい所と小さい所をつくる(平らに近い所から急な斜面まで出るように)
   const relief = 0.35 + 1.5 * smoothstep(-0.45, 0.45, gradientNoise(x / 330, z / 330, seed + 977))
+  hills *= shape.hillScale
   let h = hills * relief
 
   // 遠くは山並みにして、地平線を隠す
   const far = smoothstep(320, 1900, Math.hypot(x, z))
   if (far > 0) {
     const ridge = gradientNoise(x / 820, z / 820, seed + 1543)
-    h += far * far * (150 + 330 * (ridge + 0.5)) + far * hills * 3
+    h += far * far * (150 + 330 * (ridge + 0.5)) * shape.mountainScale + far * hills * 3
   }
   return h
 }
@@ -106,7 +124,8 @@ export class Terrain {
         this.heights[iz * this.samples + ix] = terrainHeight(
           this.origin + ix * cell,
           this.origin + iz * cell,
-          seed
+          seed,
+          options.shape
         )
       }
     }
@@ -114,11 +133,11 @@ export class Terrain {
 
   /** 地面の高さ。格子の中は格子から補間し、外は式から求める */
   heightAt(x: number, z: number): number {
-    const { cell, seed } = this.options
+    const { cell, seed, shape } = this.options
     const gx = (x - this.origin) / cell
     const gz = (z - this.origin) / cell
     const last = this.samples - 1
-    if (gx < 0 || gz < 0 || gx > last || gz > last) return terrainHeight(x, z, seed)
+    if (gx < 0 || gz < 0 || gx > last || gz > last) return terrainHeight(x, z, seed, shape)
     const ix = Math.min(Math.floor(gx), last - 1)
     const iz = Math.min(Math.floor(gz), last - 1)
     const fx = gx - ix

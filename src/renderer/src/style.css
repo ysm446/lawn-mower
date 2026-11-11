@@ -106,7 +106,7 @@ button:active:not(:disabled) {
 #view-hint,
 .side-panel,
 .switch,
-#key-help::before {
+:is(#key-help, #settings)::before {
   backdrop-filter: var(--glass);
 }
 
@@ -114,7 +114,7 @@ button:active:not(:disabled) {
 #top-right button,
 .side-panel,
 .switch,
-#key-help::before {
+:is(#key-help, #settings)::before {
   box-shadow: var(--panel-glow);
 }
 
@@ -319,6 +319,14 @@ button:active:not(:disabled) {
   white-space: nowrap;
 }
 
+/* パネルの中の短い説明 */
+.panel-note {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* チェックボックスの 1 行(weather-globe と同じ見た目) */
 /* 既定に戻すボタン(weather-globe と同じ見た目)。値が既定値のときは薄くする */
 .reset-button {
@@ -475,7 +483,7 @@ input[type='checkbox']:checked {
 
 /* ------------------------------------------------ 操作の一覧 */
 
-#key-help {
+:is(#key-help, #settings) {
   width: 760px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 48px);
@@ -486,7 +494,7 @@ input[type='checkbox']:checked {
   border-radius: 8px;
 }
 
-#key-help::before {
+:is(#key-help, #settings)::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -495,11 +503,11 @@ input[type='checkbox']:checked {
   border-radius: inherit;
 }
 
-#key-help::backdrop {
+:is(#key-help, #settings)::backdrop {
   background: transparent;
 }
 
-#key-help[open] {
+:is(#key-help, #settings)[open] {
   display: flex;
   flex-direction: column;
 }
@@ -511,12 +519,12 @@ input[type='checkbox']:checked {
   gap: 12px;
 }
 
-#key-help h2 {
+:is(#key-help, #settings) h2 {
   margin: 0;
   font-size: 16px;
 }
 
-#key-help h3 {
+:is(#key-help, #settings) h3 {
   margin: 0 0 6px;
   color: var(--text-2);
   font-size: 13px;
@@ -569,4 +577,74 @@ input[type='checkbox']:checked {
 body.minimal-ui #right-stack,
 body.minimal-ui #top-center {
   display: none;
+}
+
+/* 設定ウインドウ。タブで分けたセクションに項目を並べる */
+#settings {
+  width: min(560px, calc(100vw - 32px));
+}
+
+#settings-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 12px 0 14px;
+  padding: 3px;
+  background: var(--field);
+  border-radius: 8px;
+}
+
+#settings-tabs button {
+  flex: 1;
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+#settings-tabs button[aria-selected='true'] {
+  color: var(--text);
+  background: var(--panel-strong);
+}
+
+#settings-body {
+  min-height: 150px;
+}
+
+#settings-body .field-list {
+  gap: 10px 12px;
+}
+
+#settings-body .field-list[hidden] {
+  display: none;
+}
+
+#settings-body .switch {
+  justify-self: start;
+}
+
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+#settings-reset-all {
+  min-height: 30px;
+  padding: 0 12px;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+#settings-reset-all:hover {
+  color: var(--text);
 }

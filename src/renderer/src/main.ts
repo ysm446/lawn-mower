@@ -22,6 +22,7 @@ import { MowMap } from './render/mowMap'
 import { MowerModel } from './render/mowerModel'
 import { overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
+import { Trees } from './render/trees'
 import { DofPass, MeterPass } from './render/postfx'
 import { ZoneOverlay } from './render/zoneOverlay'
 import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposure'
@@ -29,7 +30,10 @@ import { CoverageGrid } from './sim/coverage'
 import { planCoverage, type CoveragePlan } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
+import { loadSettings, setupSettings, type AppSettings } from './settings'
+import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
+import { blockedByTrees, generateTrees } from './sim/trees'
 import {
   DEFAULT_ZONING,
   ZONE_NONE,
@@ -54,7 +58,6 @@ const FIELD_SIZE = 512
 const FIELD_ORIGIN = -FIELD_SIZE / 2
 const GROUND_EXTENT = 7000
 const MAX_GRASS_HEIGHT = 0.2
-const UNCUT_HEIGHT = 0.1
 const SIM_DT = 1 / 120
 const MAX_STEPS_PER_FRAME = 600
 // 刈った芝が寝る強さ(1 で完全に寝る)。車輪に踏まれた所は 1 にして、刈り跡の中でも筋が残るようにする
@@ -69,9 +72,6 @@ const TRACK_STEP = 0.12
 // 刈った量(m² × 長さの倍率)あたりの粒の数
 const CLIPPINGS_PER_VOLUME = 40
 const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64]
-// 芝刈り機の出発点
-const START_X = -21
-const START_Z = -55
 
 const F_STOPS = [
   1.4, 1.6, 1.8, 2, 2.2, 2.5, 2.8, 3.2, 3.5, 4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9, 10, 11, 13, 14, 16, 18,
@@ -86,12 +86,27 @@ const FOCAL_MIN = 12
 const FOCAL_MAX = 400
 const MINIATURE_MAX = 200
 
+// 例外は、起きた場所が分かるように呼び出しの経路ごと記録する(メインプロセスのログにも出る)
+window.addEventListener('error', (event) => {
+  if (event.error instanceof Error) console.error(event.error.stack)
+})
+
 const query = new URLSearchParams(window.location.search)
+
+// 設定ウインドウで変える設定(前回の値を引き継ぐ)
+const settings = loadSettings()
+
+// マップ。?map= で選ぶ(切り替えるときはページを読み込み直す)
+const map = findMap(query.get('map'))
+const UNCUT_HEIGHT = map.grass.uncutHeight
+// 芝刈り機の出発点
+const START_X = map.startX
+const START_Z = map.startZ
 
 const canvas = byId<HTMLCanvasElement>('view')
 
 const renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' })
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.pixelRatio))
 renderer.toneMapping = ACESFilmicToneMapping
 renderer.toneMappingExposure = 1
 renderer.shadowMap.enabled = true
@@ -99,7 +114,7 @@ renderer.shadowMap.type = PCFShadowMap
 
 const scene = new Scene()
 const rig = new CameraRig(canvas)
-const lighting = new Lighting(scene)
+const lighting = new Lighting(scene, rig.camera)
 
 const mowMap = new MowMap(renderer, {
   size: FIELD_SIZE,
@@ -114,8 +129,25 @@ mowMap.reset(UNCUT_HEIGHT)
 const querySeed = Number(query.get('seed'))
 const terrain = new Terrain({
   ...DEFAULT_TERRAIN,
-  seed: Number.isInteger(querySeed) && querySeed > 0 ? querySeed : DEFAULT_TERRAIN.seed
+  seed: Number.isInteger(querySeed) && querySeed > 0 ? querySeed : map.seed,
+  shape: map.shape
 })
+
+// 樹木。芝刈り機が入れない所の格子も作る(区分けで「刈らない」になる)
+const treeList = map.trees ? generateTrees(map.trees, terrain.options.seed, START_X, START_Z) : []
+const blocked = map.trees
+  ? blockedByTrees(
+      treeList,
+      map.trees,
+      terrain.options.seed,
+      terrain.samples,
+      terrain.options.cell,
+      terrain.origin
+    )
+  : undefined
+const treeModels = new Trees(treeList, terrain)
+scene.add(treeModels.group)
+const windSettings = { strength: 1 }
 
 const zoneOverlay = new ZoneOverlay(terrain)
 scene.add(zoneOverlay.lines)
@@ -135,6 +167,7 @@ const ground = createGround(
   UNCUT_HEIGHT
 )
 scene.add(ground.mesh)
+ground.uniforms.uRough.value = map.grass.roughness
 
 // 近景の芝の葉。?blades=0 で描かない
 const grassBlades = new GrassBlades(terrain, ground.uniforms)
@@ -162,11 +195,12 @@ function updateZoning(): void {
     { samples: terrain.samples, cell: terrain.options.cell, heights: terrain.heights },
     zoning.options,
     (START_X - terrain.origin) / terrain.options.cell,
-    (START_Z - terrain.origin) / terrain.options.cell
+    (START_Z - terrain.origin) / terrain.options.cell,
+    blocked
   )
   zoning.result = result
   route.dirty = true
-  zoneOverlay.update(result)
+  zoneOverlay.update(result, blocked)
   const total = result.zoneArea.reduce((a, b) => a + b)
   const area = (m2: number): string =>
     `${(m2 / 10000).toFixed(2)} ha(${((m2 / total) * 100).toFixed(0)}%)`
@@ -223,7 +257,7 @@ let tracksStarted = false
 const route = {
   options: { angleDeg: 0, overlap: 0.2, headlandPasses: 3 },
   // 刈る範囲の一辺(m)。出発点を中心とする正方形に絞る。FIELD_SIZE 以上なら絞らない
-  extent: 120,
+  extent: map.routeExtent,
   show: query.get('path') === '1',
   dirty: true,
   plan: null as CoveragePlan | null,
@@ -320,6 +354,23 @@ const syncs: Sync[] = []
 function syncUi(): void {
   for (const sync of syncs) sync()
 }
+
+// マップの切り替え。選ぶと、そのマップでページを読み込み直す
+byId('map-description').textContent = map.description
+syncs.push(
+  addSwitch(
+    byId('map-switch'),
+    MAPS.map((m) => ({ value: m.id, label: m.name, title: m.description })),
+    () => map.id,
+    (id) => {
+      if (id === map.id) return
+      const next = new URLSearchParams(window.location.search)
+      next.set('map', id)
+      next.delete('seed')
+      window.location.search = next.toString()
+    }
+  )
+)
 
 const setStatus = addReadout(byId('status-readout'), {
   speed: '速度',
@@ -473,6 +524,21 @@ syncs.push(
       lighting.settings.sunAzimuth = v
     },
     format: (v) => `${v.toFixed(0)}°`
+  })
+)
+
+syncs.push(
+  addSlider(lightFields, {
+    label: '風',
+    title: '木の枝と葉を揺らす風の強さ。0 で止まります',
+    min: 0,
+    max: 3,
+    step: 0.1,
+    get: () => windSettings.strength,
+    set: (v) => {
+      windSettings.strength = v
+    },
+    format: (v) => v.toFixed(1)
   })
 )
 
@@ -717,7 +783,8 @@ const toggleHelp = setupHelp([
   {
     title: '視点',
     items: [
-      { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰)' },
+      { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰、定点)' },
+      { keys: ['右ドラッグ'], text: '定点の視点で、カメラの位置を動かす' },
       { keys: ['左ドラッグ'], text: '機体を中心に回り込む(追従視点では、離して 2 秒で背後に戻る)' },
       { keys: ['ホイール'], text: 'カメラを近づける、離す(画角は変わらない)' }
     ]
@@ -734,7 +801,10 @@ const toggleHelp = setupHelp([
   },
   {
     title: 'その他',
-    items: [{ keys: ['?'], text: 'この一覧を開く、閉じる' }]
+    items: [
+      { keys: [','], text: '設定ウインドウを開く、閉じる' },
+      { keys: ['?'], text: 'この一覧を開く、閉じる' }
+    ]
   }
 ])
 if (query.get('help') === '1') toggleHelp()
@@ -751,6 +821,101 @@ input.onPress('KeyP', () => setAutoDrive(!sim.autoDrive))
 input.onPress('KeyR', resetAll)
 input.onPress('KeyG', () => setRouteShow(!route.show))
 input.onPress('KeyZ', () => setZoneShow(!zoning.show))
+// 設定ウインドウ。セクション(タブ)ごとに項目を並べる
+function applySetting(key: keyof AppSettings): void {
+  if (key === 'pixelRatio') resize()
+  else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
+  else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
+  else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
+  else if (key === 'shadowDistance') lighting.setShadowDistance(settings.shadowDistance)
+  else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
+  else if (key === 'clippings') {
+    clippings.mesh.visible = settings.clippings
+    if (!settings.clippings) clippings.clear()
+  }
+}
+const toggleSettings = setupSettings(
+  settings,
+  [
+    {
+      title: '描画',
+      items: [
+        {
+          type: 'choice',
+          key: 'fpsLimit',
+          label: '描画 FPS の上限',
+          title: '1 秒あたりに描く回数の上限。下げると、PC の負荷と発熱が減ります。「なし」は画面の更新に合わせます',
+          options: [
+            { value: 30, label: '30' },
+            { value: 60, label: '60' },
+            { value: 90, label: '90' },
+            { value: 120, label: '120' },
+            { value: 0, label: 'なし' }
+          ]
+        },
+        {
+          type: 'choice',
+          key: 'pixelRatio',
+          label: '描画の細かさ',
+          title: '高精細の画面で、どこまで細かく描くか。下げると軽くなり、少しぼやけます',
+          options: [
+            { value: 1, label: '標準' },
+            { value: 1.5, label: '高' },
+            { value: 2, label: '最高' }
+          ]
+        },
+        {
+          type: 'slider',
+          key: 'grassDistance',
+          label: '芝を描く距離',
+          title: 'カメラが見ている地面のまわり、この距離まで芝の葉を 1 枚ずつ描きます。12 m より先は葉をまばらにします。長くすると重くなります',
+          min: 8,
+          max: 60,
+          step: 2,
+          format: (v) => `${v.toFixed(0)} m`
+        }
+      ]
+    },
+    {
+      title: '影',
+      items: [
+        {
+          type: 'slider',
+          key: 'shadowDistance',
+          label: '影を描く距離',
+          title: 'カメラからこの距離までに影を落とします。短くすると、近くの影が細かくなります',
+          min: 60,
+          max: 500,
+          step: 10,
+          format: (v) => `${v.toFixed(0)} m`
+        },
+        {
+          type: 'choice',
+          key: 'shadowMapSize',
+          label: '影の細かさ',
+          title: '影の地図の大きさ。大きいほど影の縁がくっきりし、重くなります',
+          options: [
+            { value: 1024, label: '低' },
+            { value: 2048, label: '中' },
+            { value: 4096, label: '高' }
+          ]
+        }
+      ]
+    },
+    {
+      title: '表示',
+      items: [
+        { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数を出します' },
+        { type: 'check', key: 'showHint', label: '操作の案内を表示', title: '画面の上に、操作の案内を出します' },
+        { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' }
+      ]
+    }
+  ],
+  applySetting
+)
+for (const key of Object.keys(settings) as (keyof AppSettings)[]) applySetting(key)
+input.onPress('Comma', toggleSettings)
+if (query.get('settings') === '1') toggleSettings()
 input.onPress('Slash', toggleHelp)
 TIME_SCALES.forEach((scale, i) => {
   input.onPress(`Digit${i + 1}`, () => {
@@ -859,7 +1024,7 @@ function stepSimulation(): void {
 function resize(): void {
   const w = window.innerWidth
   const h = window.innerHeight
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.pixelRatio))
   renderer.setSize(w, h, false)
   composer.setPixelRatio(renderer.getPixelRatio())
   composer.setSize(w, h)
@@ -878,6 +1043,8 @@ function formatTime(seconds: number): string {
 }
 
 let fps = 60
+const logFps = query.get('log') === '1'
+let logTimer = 0
 function updateReadouts(dt: number): void {
   if (dt > 0) fps += (1 / dt - fps) * 0.05
   const s = rig.settings
@@ -899,11 +1066,17 @@ function updateReadouts(dt: number): void {
     ...route.text,
     progress: route.follower ? `${(route.follower.progress * 100).toFixed(1)}%` : '-'
   })
-  const fpsText =`${fps.toFixed(0)} fps`
+  // 動作確認用: ?log=1 で、描画の速さをログに出す
+  if (logFps && (logTimer += dt) > 2) {
+    logTimer = 0
+    console.warn(`fps ${fps.toFixed(0)}`)
+  }
+  const fpsText = `${fps.toFixed(0)} fps`
   if (fpsCounter.textContent !== fpsText) fpsCounter.textContent = fpsText
 }
 
 let focusDistance = 0
+let frameCount = 0
 let autoSyncTimer = 0
 const viewDirection = new Vector3()
 const scratch = new Vector3()
@@ -943,6 +1116,10 @@ function spawnClipping(x: number, z: number, vx: number, vy: number, vz: number)
 
 let last = performance.now()
 function frame(now: number): void {
+  requestAnimationFrame(frame)
+  // 描画 FPS の上限。前に描いてからの時間が足りなければ、この回は描かない。
+  // 画面の更新の間隔には揺れがあるので、少し(1.5 ミリ秒)手前で描いてよいことにする
+  if (settings.fpsLimit > 0 && now - last < 1000 / settings.fpsLimit - 1.5) return
   const dt = Math.min((now - last) / 1000, 0.1)
   last = now
 
@@ -955,7 +1132,8 @@ function frame(now: number): void {
   }
   if (steps === MAX_STEPS_PER_FRAME) accumulator = 0
   mowMap.flush()
-  emitClippings()
+  if (settings.clippings) emitClippings()
+  else cutVolume = 0
   // 粒は、倍速を上げても速くなりすぎないように進める
   clippings.update(dt * Math.min(sim.timeScale, 3))
   if (zoning.dirty) updateZoning()
@@ -964,9 +1142,12 @@ function frame(now: number): void {
   mower.sync(sim.state, dt * sim.timeScale, terrain)
   rig.update(sim.state, dt, terrain)
   const exposure = rig.exposure
+  treeModels.update(now / 1000, windSettings.strength)
+  // 後から読み込んだモデルの材質も、影の仕組みに対応させる
+  if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
   pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
-  grassBlades.update(rig.focusPoint, rig.camera.position, bladeSettings.show)
-  lighting.update(exposure, rig.focusPoint, rig.camera.position)
+  grassBlades.update(rig.camera, bladeSettings.show)
+  lighting.update(exposure, rig.camera.position)
 
   // ピントは機体に合わせる。視線に沿った距離で持つ
   const s = rig.settings
@@ -1005,6 +1186,5 @@ function frame(now: number): void {
     }
   }
   updateReadouts(dt)
-  requestAnimationFrame(frame)
 }
 requestAnimationFrame(frame)

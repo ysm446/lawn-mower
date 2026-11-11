@@ -28,6 +28,8 @@ export interface GroundUniforms {
   uBladeRadius: { value: number }
   /** 葉の濃さ(0 で葉なし) */
   uBladeAmount: { value: number }
+  /** 荒れ具合(0〜1) */
+  uRough: { value: number }
   [name: string]: { value: unknown }
 }
 
@@ -57,6 +59,7 @@ uniform float uTilt;
 uniform vec2 uBladeCenter;
 uniform float uBladeRadius;
 uniform float uBladeAmount;
+uniform float uRough; // 荒れ具合(0 は手入れされた芝、1 は荒れ草地)
 
 float mowHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -124,7 +127,15 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   // 伸びた芝は、場所によって長さが違う(芝の葉と同じ位置に出る)。長い所ほど陰が増えて暗い
   float lengthPatch = texture2D(uLengthMap, (world.xz - uLengthOrigin) / uLengthSize).r;
   longShade *= mix(1.14, 0.84, lengthPatch);
+  // 荒れ草地は、手入れされた芝ほど鮮やかな緑ではない。刈った所も刈っていない所も、同じくすんだ緑を土台にする
+  baseColor = mix(baseColor, vec3(0.105, 0.165, 0.045) * (0.9 + 0.25 * nLarge), uRough * 0.75);
   vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
+  // 荒れ草地: 伸びた草に、枯れ色の混じった所がまだらにできる
+  float dry = uRough * tall * (0.08 + 0.38 * smoothstep(0.42, 0.75, mowNoise(world.xz * 0.16 + 31.0) * 0.6 + nMid * 0.4));
+  color = mix(color, vec3(0.205, 0.190, 0.070) * (0.75 + 0.5 * nMid), dry);
+  // 刈った所には、刈り株の淡い色がまだらに出る(伸びた草の根元は、日が当たらず色が薄い)
+  float stubble = uRough * (1.0 - tall) * (0.12 + 0.3 * smoothstep(0.4, 0.8, mowNoise(world.xz * 0.16 + 31.0) * 0.6 + nMid * 0.4));
+  color = mix(color, vec3(0.200, 0.205, 0.085) * (0.8 + 0.4 * nMid), stubble);
   color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
 
   // 色相のむら。数 m ごとの株のかたまりと、数十 m の広がりで、黄みと青みの間を揺らす。
@@ -282,7 +293,8 @@ export function createGround(
     uTilt: { value: 0.2 },
     uBladeCenter: { value: new Vector2() },
     uBladeRadius: { value: 1 },
-    uBladeAmount: { value: 0 }
+    uBladeAmount: { value: 0 },
+    uRough: { value: 0 }
   }
 
   const material = new MeshStandardMaterial({ roughness: 0.6, metalness: 0 })

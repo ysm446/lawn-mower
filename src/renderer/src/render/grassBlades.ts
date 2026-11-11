@@ -1,4 +1,4 @@
-// 近景の芝の葉。注視点のまわりだけ、葉を 1 枚ずつインスタンシングで描く。
+// 近景の芝の葉。カメラが見ている地面のまわりだけ、葉を 1 枚ずつインスタンシングで描く。
 // 葉の位置は世界に固定した細かいマス目から決めるので、描く範囲が動いても葉は動かない。
 // 葉の高さと倒れる向きは芝状態マップから、根元の高さは地形の高さのテクスチャから取る。
 // 色は地面と同じ式(GRASS_GLSL)を使い、葉の無い遠くの地面と色がつながるようにする。
@@ -15,7 +15,8 @@ import {
   NearestFilter,
   RedFormat,
   Vector2,
-  type Vector3
+  Vector3,
+  type PerspectiveCamera
 } from 'three'
 import type { Terrain } from '../sim/terrain'
 import { LENGTH_FACTOR_MAX, LENGTH_FACTOR_MIN } from '../sim/grassField'
@@ -36,6 +37,10 @@ export const DEFAULT_GRASS_BLADES: GrassBladeOptions = {
   bladeWidth: 0.018
 }
 
+/** この半径(m)までは、マス目に 1 枚ずつ葉を置く。その外はまばらにする */
+const FULL_RADIUS = 12
+/** 葉を描く範囲を動かす刻み(マス)。まばらにする間隔の最大(4 マス)に合わせる */
+const PATCH_SNAP = 4
 /** カメラがこれより離れたら葉を描かない(m)。1 画素より細くなって、ちらつくだけになるため */
 const HIDE_DISTANCE = 70
 /** この距離から、葉を少しずつ低くして消していく(m) */
@@ -43,6 +48,7 @@ const FADE_DISTANCE = 30
 
 const VERTEX_HEADER = /* glsl */ `
 attribute vec2 aCell;
+attribute float aWide; // 葉の幅の倍率。遠くは葉をまばらにする代わりに、1 枚を太くする
 uniform sampler2D uHeightMap;
 uniform float uHeightOrigin;
 uniform float uHeightCell;
@@ -60,6 +66,7 @@ uniform float uUncutNorm;
 uniform vec2 uBladeCenter;
 uniform float uBladeRadius;
 uniform float uBladeAmount;
+uniform float uRough;
 varying vec3 vBladeRoot;
 varying float vBladeT;
 
@@ -131,7 +138,8 @@ float cutVary = 0.7 + 0.6 * rndC + step(0.965, rndD) * (0.8 + 1.2 * rndA);
 float lengthPatch = texture2D(uLengthMap, (bladeRoot - uLengthOrigin) / uLengthSize).r;
 float longVary = (0.55 + 0.9 * rndC) * mix(LENGTH_MIN, LENGTH_MAX, lengthPatch);
 bladeHeight *= mix(longVary, cutVary, bladeCut) * bladeFade;
-float wild = (1.0 - bladeCut) * 0.55 + 0.08;
+// 荒れ草地の草は、向きがより乱れ、倒れかかったものも混じる
+float wild = (1.0 - bladeCut) * (0.55 + 0.5 * uRough) + 0.08;
 float wildAngle = rndB * 6.2832;
 vec2 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
 
@@ -172,7 +180,7 @@ objectNormal = normalize(mix(freeNormal, laidNormal, laid));
 
 const VERTEX_POSITION = /* glsl */ `
 float bladeT = position.y;
-vec2 bladeSide = widthDir * position.x * uBladeWidth * step(0.001, bladeHeight);
+vec2 bladeSide = widthDir * position.x * uBladeWidth * aWide * step(0.001, bladeHeight);
 // 根元は立ち気味で、先へ行くほど寝る
 float layHere = layAngle * (0.45 + 0.55 * bladeT);
 vec2 bladeOffset = bladeSide
@@ -192,6 +200,16 @@ vec4 bladeState = mowSample(vBladeRoot.xz);
 vec3 bladeColor = mowGrassColor(vBladeRoot, bladeState, cameraPosition);
 // 根元は陰になって暗く、先は光が透けて明るい
 bladeColor *= mix(0.62, 1.18, vBladeT);
+// 荒れ草地: 伸びた草には、枯れ色の葉、穂、小さな花が混じる。刈ると無くなる
+float bladeTall = smoothstep(0.03, 0.08, bladeState.a * uMaxHeight) * uRough;
+float bladeKind = mowHash(floor(vBladeRoot.xz * 60.0) + 7.3);
+// 枯れ色の葉(先へ行くほど枯れている)
+bladeColor = mix(bladeColor, vec3(0.34, 0.30, 0.11), bladeTall * step(0.72, bladeKind) * (0.35 + 0.65 * vBladeT));
+// 穂(先だけが淡い色)
+bladeColor = mix(bladeColor, vec3(0.50, 0.45, 0.24), bladeTall * step(0.9, bladeKind) * smoothstep(0.7, 0.9, vBladeT));
+// 小さな花(白と黄)。先だけに付く
+float flower = bladeTall * step(0.982, bladeKind) * smoothstep(0.78, 0.92, vBladeT);
+bladeColor = mix(bladeColor, bladeKind > 0.991 ? vec3(0.85, 0.62, 0.06) : vec3(0.82, 0.82, 0.76), flower);
 diffuseColor.rgb = bladeColor;
 `
 
@@ -208,11 +226,13 @@ normal = normalize(normal + (viewMatrix * vec4(bladeTilt, 0.0)).xyz);
 export class GrassBlades {
   readonly mesh: Mesh
   private readonly patchCell = new Vector2()
+  private readonly geometry: InstancedBufferGeometry
+  private readonly forward = new Vector3()
 
   constructor(
-    terrain: Terrain,
+    private readonly terrain: Terrain,
     private readonly ground: GroundUniforms,
-    private readonly options: GrassBladeOptions = DEFAULT_GRASS_BLADES
+    private readonly options: GrassBladeOptions = { ...DEFAULT_GRASS_BLADES }
   ) {
     const { radius, spacing } = options
 
@@ -232,15 +252,8 @@ export class GrassBlades {
     geometry.setIndex([0, 1, 2, 1, 3, 2, 2, 3, 4])
 
     // 円の中のマス目に 1 枚ずつ置く
-    const reach = Math.ceil(radius / spacing)
-    const cells: number[] = []
-    for (let iz = -reach; iz <= reach; iz++) {
-      for (let ix = -reach; ix <= reach; ix++) {
-        if (ix * ix + iz * iz <= reach * reach) cells.push(ix, iz)
-      }
-    }
-    geometry.setAttribute('aCell', new InstancedBufferAttribute(new Float32Array(cells), 2))
-    geometry.instanceCount = cells.length / 2
+    this.geometry = geometry
+    this.setRadius(radius)
 
     const heightMap = new DataTexture(
       terrain.heights,
@@ -253,7 +266,6 @@ export class GrassBlades {
     heightMap.magFilter = NearestFilter
     heightMap.needsUpdate = true
 
-    ground.uBladeRadius.value = radius
     const uniforms = {
       ...ground,
       uHeightMap: { value: heightMap },
@@ -292,22 +304,68 @@ export class GrassBlades {
     this.mesh.receiveShadow = true
   }
 
+  /**
+   * 葉を描く範囲の半径(m)を変える。葉の並びを作り直す。
+   * 近く(FULL_RADIUS まで)はマス目に 1 枚ずつ。その外は 2 マスおき、さらに外は 4 マスおきにして、
+   * 枚数が増えすぎないようにする。まばらにした分は、葉を太くして埋める
+   */
+  setRadius(radius: number): void {
+    const spacing = this.options.spacing
+    this.options.radius = radius
+    this.ground.uBladeRadius.value = radius
+    const reach = Math.ceil(radius / spacing)
+    const full = FULL_RADIUS / spacing
+    const cells: number[] = []
+    const wide: number[] = []
+    for (let iz = -reach; iz <= reach; iz++) {
+      for (let ix = -reach; ix <= reach; ix++) {
+        const d2 = ix * ix + iz * iz
+        if (d2 > reach * reach) continue
+        const d = Math.sqrt(d2)
+        const step = d <= full ? 1 : d <= full * 2 ? 2 : 4
+        // 範囲は PATCH_SNAP マスずつ動かすので、相対の番号で間引いても、同じ場所の葉が残る
+        if ((ix & (step - 1)) !== 0 || (iz & (step - 1)) !== 0) continue
+        cells.push(ix, iz)
+        wide.push(step === 1 ? 1 : step === 2 ? 1.8 : 3)
+      }
+    }
+    this.geometry.setAttribute('aCell', new InstancedBufferAttribute(new Float32Array(cells), 2))
+    this.geometry.setAttribute('aWide', new InstancedBufferAttribute(new Float32Array(wide), 1))
+    this.geometry.instanceCount = cells.length / 2
+  }
+
   /** 葉の枚数 */
   get count(): number {
     return (this.mesh.geometry as InstancedBufferGeometry).instanceCount
   }
 
-  /** 毎フレーム呼ぶ。葉を描く範囲を注視点に合わせる */
-  update(focus: Vector3, cameraPosition: Vector3, enabled: boolean): void {
-    const distance = cameraPosition.distanceTo(focus)
+  /**
+   * 毎フレーム呼ぶ。葉を描く範囲を、カメラが見ている地面に合わせる。
+   * 範囲の中心は、視線が地面に当たる所。ただし遠くを見ているときは、カメラの手前
+   * (範囲の半径の 0.75 倍だけ前)に置く。近くの草ほど大きく写り、葉が要るため
+   */
+  update(camera: PerspectiveCamera, enabled: boolean): void {
+    const position = camera.position
+    camera.getWorldDirection(this.forward)
+    const flat = Math.hypot(this.forward.x, this.forward.z)
+    const height = Math.max(position.y - this.terrain.heightAt(position.x, position.z), 0.1)
+    // 視線が地面(カメラの真下と同じ高さの水平面とみなす)に当たるまでの、水平の距離
+    const reach = this.forward.y < -1e-3 ? (height * flat) / -this.forward.y : Infinity
+    const ahead = Math.min(reach, this.options.radius * 0.75)
+    const cx = position.x + (flat > 1e-4 ? (this.forward.x / flat) * ahead : 0)
+    const cz = position.z + (flat > 1e-4 ? (this.forward.z / flat) * ahead : 0)
+
+    // カメラから範囲の中心までが遠いと、葉は 1 画素より細くなる。少しずつ低くして消す
+    const distance = Math.hypot(ahead, position.y - this.terrain.heightAt(cx, cz))
     const visible = enabled && distance < HIDE_DISTANCE
     this.mesh.visible = visible
     const t = Math.min(Math.max((distance - FADE_DISTANCE) / (HIDE_DISTANCE - FADE_DISTANCE), 0), 1)
     this.ground.uBladeAmount.value = visible ? 1 - t * t * (3 - 2 * t) : 0
-    this.ground.uBladeCenter.value.set(focus.x, focus.z)
+    this.ground.uBladeCenter.value.set(cx, cz)
     this.patchCell.set(
-      Math.floor(focus.x / this.options.spacing),
-      Math.floor(focus.z / this.options.spacing)
+      Math.floor(cx / this.options.spacing / PATCH_SNAP) * PATCH_SNAP,
+      Math.floor(cz / this.options.spacing / PATCH_SNAP) * PATCH_SNAP
     )
   }
+
 }
