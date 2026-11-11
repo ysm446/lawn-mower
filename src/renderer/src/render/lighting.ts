@@ -101,7 +101,8 @@ float cloudDensity(vec2 p) {
 // 地上の点に届く太陽の光の割合。太陽の方向へたどった先の雲の濃さで決まる
 float cloudShadow(vec3 world) {
   vec2 p = world.xz + uCloudSun * (${CLOUD_HEIGHT.toFixed(1)} - world.y);
-  return 1.0 - 0.7 * cloudDensity(p);
+  // 厚い雲の下では、太陽の光はほとんど届かない(残るのは空からの光)
+  return 1.0 - 0.92 * cloudDensity(p);
 }
 `
 

@@ -1534,7 +1534,7 @@ function frame(now: number): void {
     lighting.settings.sunElevation
   )
 
-  // ピントは機体に合わせる。視線に沿った距離で持つ
+  // ピントは機体に合わせる(定点の視点では、画面の中央に見えている地面)。視線に沿った距離で持つ
   const s = rig.settings
   const focusTarget = Math.max(
     0.5,

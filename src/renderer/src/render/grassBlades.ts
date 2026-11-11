@@ -43,6 +43,8 @@ const FULL_RADIUS = 12
 const PATCH_SNAP = 4
 /** 見ている地面までの距離(35 mm のレンズに直した値、m)がこれを超えるたびに、葉の間隔と太さを 2 倍にする */
 const LEVEL_DISTANCE = 26
+/** 視線が地面に当たる所を探す距離の上限(m) */
+const SIGHT_LIMIT = 4000
 /** 段の上限(4 なら 16 倍まで) */
 const MAX_LEVEL = 4
 
@@ -247,6 +249,8 @@ export class GrassBlades {
   private readonly scale = { value: 1 }
   private level = 0
   private readonly forward = new Vector3()
+  private readonly up = new Vector3()
+  private readonly low = new Vector3()
 
   constructor(
     private readonly terrain: Terrain,
@@ -365,13 +369,32 @@ export class GrassBlades {
   update(camera: PerspectiveCamera, enabled: boolean): void {
     const position = camera.position
     camera.getWorldDirection(this.forward)
-    const flat = Math.hypot(this.forward.x, this.forward.z)
-    const height = Math.max(position.y - this.terrain.heightAt(position.x, position.z), 0.1)
-    // 視線が地面(カメラの真下と同じ高さの水平面とみなす)に当たるまでの、水平の距離
-    const reach = this.forward.y < -1e-3 ? (height * flat) / -this.forward.y : Infinity
+    const f = this.forward
+    const flat = Math.hypot(f.x, f.z)
+    // 画面の中央の視線が地面に当たるまでの距離。地形の起伏どおりに求める。
+    // カメラの真下の高さの水平面とみなすと、起伏のある所でカメラを回しただけで距離が大きく変わり、
+    // 葉を描く範囲が急に小さくなったり、見ている所から外れたりする
+    const distance = this.terrain.rayDistance(position.x, position.y, position.z, f.x, f.y, f.z, SIGHT_LIMIT)
+    const reach = distance * flat
+    // 画面の下の端の視線が地面に当たる所までの、水平の距離。画面に写る地面のうち、いちばん手前
+    const half = (camera.fov * Math.PI) / 360
+    this.up.set(0, 1, 0).applyQuaternion(camera.quaternion)
+    this.low.copy(f).multiplyScalar(Math.cos(half)).addScaledVector(this.up, -Math.sin(half))
+    const nearDistance = this.terrain.rayDistance(
+      position.x,
+      position.y,
+      position.z,
+      this.low.x,
+      this.low.y,
+      this.low.z,
+      SIGHT_LIMIT
+    )
+    const nearReach = nearDistance * Math.hypot(this.low.x, this.low.z)
 
-    // 見ている地面までの距離を、35 mm のレンズで見たときの距離に直す(望遠ほど大きく写るので、近いのと同じ)
-    const sight = Math.hypot(Math.min(reach, 4000), height) * (35 / camera.getFocalLength())
+    // 見ている地面までの距離を、35 mm のレンズで見たときの距離に直す(望遠ほど大きく写るので、近いのと同じ)。
+    // 地面すれすれに見ているときは、中央の視線が丘を越えて遠くに当たることがある。
+    // 手前の地面が近いなら、そちらに合わせた細かさを保つ
+    const sight = Math.min(distance, nearDistance * 3) * (35 / camera.getFocalLength())
     // 段を決める。境目で行き来してちらつかないよう、今の段から動くには 15% の余裕を越える必要がある
     let level = this.level
     while (level < MAX_LEVEL && sight > LEVEL_DISTANCE * 2 ** level * 1.15) level++
@@ -383,10 +406,11 @@ export class GrassBlades {
     this.scale.value = scale
     this.ground.uBladeRadius.value = radius
 
-    // 範囲の中心は、視線が地面に当たる所。遠くを見ているときは、カメラの少し前に置く。
-    // 葉が密なのは中心のまわり(FULL_RADIUS まで)なので、中心をカメラから離しすぎると、手前の葉がまばらになる。
+    // 範囲の中心は、視線が地面に当たる所。
+    // 葉が密なのは中心のまわり(FULL_RADIUS まで)なので、中心を離しすぎると、手前の葉がまばらになる。
+    // 画面に写るいちばん手前の地面が密な範囲に入るように、そこから離せる距離を限る。
     // 描く距離(radius)を伸ばしても中心は動かさず、外側へ広がるだけにする
-    const ahead = Math.min(reach, FULL_RADIUS * scale * 0.75, radius * 0.75)
+    const ahead = Math.min(reach, nearReach + Math.min(FULL_RADIUS * scale, radius) * 0.75)
     const cx = position.x + (flat > 1e-4 ? (this.forward.x / flat) * ahead : 0)
     const cz = position.z + (flat > 1e-4 ? (this.forward.z / flat) * ahead : 0)
     this.mesh.visible = enabled

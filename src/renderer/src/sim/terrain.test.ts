@@ -44,6 +44,17 @@ describe('Terrain', () => {
     expect(tooSteep / count).toBeLessThan(0.1)
   })
 
+  it('斜めに見下ろした線が地面に当たる距離を求める。空へ向けた線は上限を返す', () => {
+    const py = terrain.heightAt(10, 10) + 30
+    const d = { x: 0.6, y: -0.64, z: 0.48 }
+    const t = terrain.rayDistance(10, py, 10, d.x, d.y, d.z, 1000)
+    expect(t).toBeGreaterThan(10)
+    expect(t).toBeLessThan(1000)
+    // 当たった点は地面の上にある
+    expect(py + d.y * t).toBeCloseTo(terrain.heightAt(10 + d.x * t, 10 + d.z * t), 1)
+    expect(terrain.rayDistance(10, py, 10, 0, 1, 0, 1000)).toBe(1000)
+  })
+
   it('進行方向の傾きは、向きを反転すると符号が変わる', () => {
     const up = terrain.gradeAlong(20, 20, 0.7)
     const down = terrain.gradeAlong(20, 20, 0.7 + Math.PI)

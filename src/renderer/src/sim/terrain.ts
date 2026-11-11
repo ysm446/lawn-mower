@@ -151,6 +151,28 @@ export class Terrain {
     return a + (b - a) * fx + (c - a + (a - b - c + d) * fx) * fz
   }
 
+  /**
+   * 点 (px, py, pz) から向き (dx, dy, dz)(長さ 1)へ進んだ線が、地面に当たるまでの距離(m)。
+   * max まで進んでも当たらなければ max を返す。
+   * 遠くほど粗く進み、地面の下に入ったら、その区間を二分して詰める
+   */
+  rayDistance(px: number, py: number, pz: number, dx: number, dy: number, dz: number, max: number): number {
+    let near = 0
+    let far = 0
+    while (far < max) {
+      near = far
+      far = Math.min(max, far + Math.max(0.5, far * 0.03))
+      if (py + dy * far > this.heightAt(px + dx * far, pz + dz * far)) continue
+      for (let i = 0; i < 12; i++) {
+        const mid = (near + far) / 2
+        if (py + dy * mid <= this.heightAt(px + dx * mid, pz + dz * mid)) far = mid
+        else near = mid
+      }
+      return far
+    }
+    return max
+  }
+
   /** 地面の傾き。span は差分をとる幅(m) */
   gradientAt(x: number, z: number, out: Gradient, span = 1): Gradient {
     const half = span / 2

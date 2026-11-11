@@ -65,6 +65,9 @@ const MODE_FOCAL_LENGTH: Record<CameraMode, number> = {
   fixed: 50
 }
 
+/** 定点の視点で、画面の中央の地面を探す距離の上限(m)。空を見ているときのピントの距離にもなる */
+const SIGHT_MAX_DISTANCE = 3000
+
 export class CameraRig {
   readonly camera = new PerspectiveCamera(50, 1, 0.3, 6000)
   readonly settings: CameraSettings = { ...DEFAULT_CAMERA_SETTINGS }
@@ -72,6 +75,7 @@ export class CameraRig {
   private readonly controls: OrbitControls
   private readonly focus = new Vector3()
   private readonly lastFocus = new Vector3()
+  private readonly sight = new Vector3()
   private readonly tmp = new Vector3()
   private readonly arm = new Spherical()
   private initialized = false
@@ -303,6 +307,7 @@ export class CameraRig {
       this.turnArm(dt)
       this.controls.update()
       this.keepAboveGround(terrain)
+      this.findSight(terrain)
     } else {
       const zoom = this.topZoom
       this.tmp.set(this.focus.x - 60 * zoom, this.focus.y + 150 * zoom, this.focus.z - 110 * zoom)
@@ -321,7 +326,19 @@ export class CameraRig {
     if (p.y < floor) p.y = floor
   }
 
+  /**
+   * 画面の中央の視線が地面に当たる点を sight に入れる(定点の視点のピント用)。
+   * 地面に当たらない(空を見ている)ときは、遠くの点にする
+   */
+  private findSight(terrain: Terrain): void {
+    const p = this.camera.position
+    const d = this.camera.getWorldDirection(this.tmp)
+    const t = terrain.rayDistance(p.x, p.y, p.z, d.x, d.y, d.z, SIGHT_MAX_DISTANCE)
+    this.sight.set(p.x + d.x * t, p.y + d.y * t, p.z + d.z * t)
+  }
+
+  /** ピントを合わせる点。定点の視点では画面の中央に見えている地面、ほかの視点では機体 */
   get focusPoint(): Vector3 {
-    return this.focus
+    return this.mode === 'fixed' && this.initialized ? this.sight : this.focus
   }
 }
