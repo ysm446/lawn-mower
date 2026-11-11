@@ -194,14 +194,19 @@ export class CameraRig {
     this.armTilt = 0
   }
 
-  /** 定点の視点の、自動の旋回の段(正が右回り。カメラが右へ回り込む)。0 は止まっている */
+  /** キー(W / A / S / D、Q / E)でカメラを回せる視点か(ドローンと定点) */
+  get armControls(): boolean {
+    return this.mode === 'orbit' || this.mode === 'fixed'
+  }
+
+  /** ドローンと定点の視点の、自動の旋回の段(正が右回り。カメラが右へ回り込む)。0 は止まっている */
   get orbitLevel(): number {
     return this.orbitStep
   }
 
-  /** 自動の旋回の段を step だけ変える。定点の視点でだけ働く */
+  /** 自動の旋回の段を step だけ変える。ドローンと定点の視点でだけ働く */
   stepOrbit(step: number): void {
-    if (this.mode !== 'fixed') return
+    if (!this.armControls) return
     this.orbitStep = Math.min(Math.max(this.orbitStep + step, -ORBIT_LEVELS), ORBIT_LEVELS)
   }
 
@@ -211,7 +216,7 @@ export class CameraRig {
     this.armTiltGoal = tilt
   }
 
-  /** 定点の視点で、自動の旋回とキーの分だけ、注視点のまわりにアームを回す */
+  /** ドローンと定点の視点で、自動の旋回とキーの分だけ、注視点のまわりにアームを回す */
   private turnArm(dt: number): void {
     this.orbitThrottle += (this.orbitStep - this.orbitThrottle) * (1 - Math.exp(-dt / ORBIT_SECONDS))
     if (this.orbitStep === 0 && Math.abs(this.orbitThrottle) < 1e-3) this.orbitThrottle = 0
@@ -382,6 +387,8 @@ export class CameraRig {
         cam.position.add(this.tmp)
         this.controls.target.add(this.tmp)
       }
+      // 定点と同じく、キーと自動の旋回で、機体のまわりにアームを回す
+      this.turnArm(dt)
       this.controls.update()
       this.keepAboveGround(terrain)
     } else if (this.mode === 'fixed') {
