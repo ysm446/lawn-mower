@@ -495,23 +495,55 @@ function finishPlot(unit: MowerUnit): void {
 
 const params = FAIRWAY_MOWER
 
-// 芝刈り機。出発点に、横に並べて置く。起動時の指定 mowers=1〜5 で台数を変えられる(既定は 3 台)
-const MOWER_COUNT = Math.min(Math.max(Math.round(Number(query.get('mowers')) || 3), 1), 5)
+// 芝刈り機。出発点に、横に並べて置く。台数は「区画と経路」パネルで 1〜5 台に変えられる(既定は 3 台)。
+// 起動時の指定 mowers=1〜5 でも変えられる
+const MAX_MOWERS = 5
+const DEFAULT_MOWERS = 3
+const initialMowers = Math.min(Math.max(Math.round(Number(query.get('mowers')) || DEFAULT_MOWERS), 1), MAX_MOWERS)
 /** 出発点に並べるときの、機体どうしの横の間隔(m) */
 const MOWER_SPACING = 5
 /** i 台目の出発点。出発点を中心に、進む向き(+Z)と直交する向き(X)に並べる */
 function startPose(i: number): { x: number; z: number; heading: number } {
-  return { x: START_X + (i - (MOWER_COUNT - 1) / 2) * MOWER_SPACING, z: START_Z, heading: 0 }
+  return { x: START_X + (i - (mowers.length - 1) / 2) * MOWER_SPACING, z: START_Z, heading: 0 }
 }
 const mowers: MowerUnit[] = []
-for (let i = 0; i < MOWER_COUNT; i++) {
-  const pose = startPose(i)
-  const unit = new MowerUnit(i, params, pose.x, pose.z, pose.heading)
+/** 乗っている機体。null なら誰にも乗っておらず、俯瞰で全体を見る */
+let rider: MowerUnit | null = null
+
+/**
+ * 台数を変える。足りない分は作り、多い分は後ろの番号から消す。
+ * 出発点の並びが変わるので、全台を出発点に並べ直す(自動運転は止め、受け持つ区画も決め直す)。刈った芝はそのまま
+ */
+function setMowerCount(count: number): void {
+  const n = Math.min(Math.max(Math.round(count), 1), MAX_MOWERS)
+  if (n === mowers.length) return
+  while (mowers.length > n) {
+    const unit = mowers.pop() as MowerUnit
+    if (unit === rider) leaveMower()
+    scene.remove(unit.model.root)
+    unit.model.dispose()
+  }
+  while (mowers.length < n) {
+    const unit = new MowerUnit(mowers.length, params, START_X, START_Z, 0)
+    scene.add(unit.model.root)
+    mowers.push(unit)
+  }
+  mowers.forEach((unit, i) => {
+    const pose = startPose(i)
+    unit.reset(pose.x, pose.z, pose.heading)
+  })
+  refreshPathLine()
+  refreshPlotOverlay()
+}
+for (let i = 0; i < initialMowers; i++) {
+  const unit = new MowerUnit(i, params, START_X, START_Z, 0)
   scene.add(unit.model.root)
   mowers.push(unit)
 }
-/** 乗っている機体。null なら誰にも乗っておらず、俯瞰で全体を見る */
-let rider: MowerUnit | null = null
+mowers.forEach((unit, i) => {
+  const pose = startPose(i)
+  unit.reset(pose.x, pose.z, pose.heading)
+})
 
 const coverage = new CoverageGrid(FIELD_ORIGIN, FIELD_ORIGIN, FIELD_SIZE, FIELD_SIZE, 0.5)
 
@@ -1131,6 +1163,20 @@ syncs.push(
     pathLine.visible = route.show
     plotOverlay.visible = route.show
   },
+  addSlider(routeFields, {
+    label: '台数',
+    title: '芝刈り機の台数。変えると全台を出発点に並べ直します(自動運転は止まります。刈った芝はそのまま)',
+    min: 1,
+    max: MAX_MOWERS,
+    step: 1,
+    defaultValue: () => DEFAULT_MOWERS,
+    get: () => mowers.length,
+    set: (v) => {
+      setMowerCount(v)
+      syncUi()
+    },
+    format: (v) => `${v.toFixed(0)} 台`
+  }),
   addSlider(routeFields, {
     label: '区画の広さ',
     title: '区画 1 つの広さの目安。刈れる範囲を、標高や斜面の向きが似た所どうしで、この広さの区画に分けます',

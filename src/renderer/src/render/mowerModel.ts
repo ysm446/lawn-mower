@@ -27,6 +27,8 @@ export class MowerModel {
   private reels: Object3D[] = []
   private readonly placeholder = new Group()
   private deckLift = 0
+  /** 片付けたか。片付けたあとに読み込みが終わっても、モデルは足さない */
+  private disposed = false
   private readonly left = new Vector3()
   private readonly up = new Vector3()
   private readonly forward = new Vector3()
@@ -113,6 +115,10 @@ export class MowerModel {
       mowerUrl,
       (gltf) => {
         const model = gltf.scene
+        if (this.disposed) {
+          disposeObject(model)
+          return
+        }
         const find = (name: string): Object3D | null => model.getObjectByName(name) ?? null
         const deck = find('deck')
         // 部品は、機種の定義(mowers/*.json)の並び順の番号で名前がついている
@@ -190,4 +196,21 @@ export class MowerModel {
       for (const r of this.reels) r.rotation.x += dt * 30
     }
   }
+
+  /** 形と材質を片付ける。台数を減らして機体を消すときに呼ぶ(シーンからは呼ぶ側で外す) */
+  dispose(): void {
+    this.disposed = true
+    disposeObject(this.root)
+    disposeObject(this.placeholder)
+  }
+}
+
+/** その下にあるメッシュの形と材質を片付ける */
+function disposeObject(object: Object3D): void {
+  object.traverse((obj) => {
+    if (!(obj instanceof Mesh)) return
+    obj.geometry.dispose()
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+    for (const material of materials) material.dispose()
+  })
 }
