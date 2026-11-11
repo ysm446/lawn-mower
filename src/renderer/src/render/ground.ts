@@ -13,8 +13,7 @@ import {
   RedFormat,
   UnsignedByteType,
   MeshStandardMaterial,
-  Vector2,
-  type Texture
+  Vector2
 } from 'three'
 import type { GrassField } from '../sim/grassField'
 import type { Terrain } from '../sim/terrain'
@@ -23,8 +22,6 @@ import type { MowMap } from './mowMap'
 export interface GroundUniforms {
   uStripe: { value: number }
   uTilt: { value: number }
-  /** 区分けの色を重ねる強さ(0 で表示しない) */
-  uZoneOverlay: { value: number }
   /** 近景の芝の葉を描く範囲の中心(x, z) */
   uBladeCenter: { value: Vector2 }
   /** その半径(m) */
@@ -44,6 +41,8 @@ export interface Ground {
  * 同じ式を使うことで、葉のある範囲と無い範囲の色がつながる。
  */
 export const GRASS_GLSL = /* glsl */ `
+// 車輪の跡の強さ(0 で刈っただけの所と同じ、1 で最も強い)。地面と芝の葉で同じ値を使う
+#define TRACK_STRENGTH 0.5
 uniform sampler2D uMowMap;
 uniform vec2 uMowOrigin;
 uniform float uMowSize;
@@ -55,10 +54,6 @@ uniform float uMaxHeight;
 uniform float uUncutNorm;
 uniform float uStripe;
 uniform float uTilt;
-uniform sampler2D uZoneMap;
-uniform float uZoneOrigin;
-uniform float uZoneSize;
-uniform float uZoneOverlay;
 uniform vec2 uBladeCenter;
 uniform float uBladeRadius;
 uniform float uBladeAmount;
@@ -125,7 +120,7 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   vec3 longShade = mix(vec3(0.58, 0.56, 0.60), vec3(0.88, 0.82, 0.84), nLarge * 0.4 + nMid * 0.6);
   float tall = smoothstep(0.02, 0.06, height);
   // 伸びた芝でも、踏まれて寝た所は葉の面が上を向き、陰が減って明るく見える
-  tall *= 1.0 - 0.5 * min(length(lean), 1.0);
+  tall *= 1.0 - 0.35 * min(length(lean), 1.0);
   // 伸びた芝は、場所によって長さが違う(芝の葉と同じ位置に出る)。長い所ほど陰が増えて暗い
   float lengthPatch = texture2D(uLengthMap, (world.xz - uLengthOrigin) / uLengthSize).r;
   longShade *= mix(1.14, 0.84, lengthPatch);
@@ -146,7 +141,7 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   float layPatch = mix(0.5, 1.0, mowNoise(world.xz * 0.8 + 3.1));
   // 車輪に踏まれた所は、むらなく強く寝ている
   float pressed = smoothstep(0.84, 0.97, length(lean));
-  color *= 1.0 + uStripe * mix(layPatch, 1.2, pressed) * dot(lean, toFrag.xz);
+  color *= 1.0 + uStripe * mix(layPatch, 1.0, pressed * TRACK_STRENGTH) * dot(lean, toFrag.xz);
   // 刈った所にも、刈り方のむらによる濃淡を少し残す
   color *= 1.0 + (nMid - 0.5) * 0.16 * (1.0 - tall);
   // 進行方向に沿った細い筋(リールやローラーの当たりむら)
@@ -164,27 +159,6 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   color = mix(color, color * vec3(1.5, 1.32, 1.0) + vec3(0.012, 0.014, 0.0), fleck * litter * 0.7);
 
   return color;
-}
-
-// 区分けの塗り(色と濃さ)。光の当たり方によらず同じ明るさで見せたいので、
-// 照明の計算が済んだ色の上に重ねる(mowApplyZone)
-vec3 mowApplyZone(vec3 lit, vec2 xz) {
-  vec2 zoneUv = (xz - uZoneOrigin) / uZoneSize;
-  vec3 result = lit;
-  if (uZoneOverlay > 0.0 && zoneUv.x > 0.0 && zoneUv.x < 1.0 && zoneUv.y > 0.0 && zoneUv.y < 1.0) {
-    // 塗りは格子で持っているので、斜めの縁が階段状になる。0.7 m ずらした 4 点の平均でならす
-    vec2 o = vec2(0.7 / uZoneSize);
-    vec4 a = texture2D(uZoneMap, zoneUv + vec2(o.x, o.y));
-    vec4 b = texture2D(uZoneMap, zoneUv + vec2(-o.x, o.y));
-    vec4 c = texture2D(uZoneMap, zoneUv + vec2(o.x, -o.y));
-    vec4 d = texture2D(uZoneMap, zoneUv + vec2(-o.x, -o.y));
-    float alpha = (a.a + b.a + c.a + d.a) * 0.25;
-    // 色は、塗りのある点だけで平均する(塗りのない点の黒が混ざらないように)
-    vec3 tint = (a.rgb * a.a + b.rgb * b.a + c.rgb * c.a + d.rgb * d.a) / max(alpha * 4.0, 1e-4);
-    // 縁に近い所ほど少し明るくして、縁が光って見えるようにする
-    result = mix(lit, tint * (0.75 + alpha * 0.6), alpha * uZoneOverlay);
-  }
-  return result;
 }
 `
 
@@ -204,7 +178,7 @@ const FRAGMENT_NORMAL = /* glsl */ `
 // 車輪に踏まれた所は葉が強く寝るので、法線も大きく傾く
 float mowPressed = smoothstep(0.84, 0.97, length(mowLean));
 vec3 mowTilt = vec3(-mowLean.x, 0.0, -mowLean.y) * uTilt
-  * mix(mix(0.5, 1.0, mowNoise(vMowWorld.xz * 0.8 + 3.1)), 1.7, mowPressed);
+  * mix(mix(0.5, 1.0, mowNoise(vMowWorld.xz * 0.8 + 3.1)), 1.7, mowPressed * TRACK_STRENGTH);
 // 葉の 1 枚 1 枚の向きのばらつきを、細かいノイズで法線に与える。太陽の反射がちらちらと散る
 float glintFade = 1.0 - smoothstep(6.0, 32.0, length(vMowWorld - cameraPosition));
 vec2 glintCell = vMowWorld.xz * 55.0;
@@ -276,7 +250,6 @@ export function createGround(
   mowMap: MowMap,
   terrain: Terrain,
   grassField: GrassField,
-  zoneMap: Texture,
   extent: number,
   uncutHeight: number
 ): Ground {
@@ -307,11 +280,6 @@ export function createGround(
     uUncutNorm: { value: uncutHeight / o.maxHeight },
     uStripe: { value: 0.18 },
     uTilt: { value: 0.2 },
-    uZoneMap: { value: zoneMap },
-    // テクセルの中心が格子点に重なるように、半マス分だけ広く取る
-    uZoneOrigin: { value: terrain.origin - terrain.options.cell / 2 },
-    uZoneSize: { value: terrain.options.size + terrain.options.cell },
-    uZoneOverlay: { value: 0 },
     uBladeCenter: { value: new Vector2() },
     uBladeRadius: { value: 1 },
     uBladeAmount: { value: 0 }
@@ -329,10 +297,6 @@ export function createGround(
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)
       .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_COLOR)
-      .replace(
-        '#include <opaque_fragment>',
-        '#include <opaque_fragment>\ngl_FragColor.rgb = mowApplyZone(gl_FragColor.rgb, vMowWorld.xz);'
-      )
       .replace(
         '#include <normal_fragment_begin>',
         '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL

@@ -144,6 +144,8 @@ float laid = min(leanAmount, 1.0);
 float layPatch = mix(0.5, 1.0, bladeNoise(bladeRoot * 0.8 + 3.1));
 // 車輪に踏まれた所(刈っただけの所より向きが強く書き込まれている)は、むらなく強く寝る
 float pressed = smoothstep(0.84, 0.97, leanAmount);
+// 0.5 は車輪の跡の強さ(ground.ts の TRACK_STRENGTH と揃える)
+pressed *= 0.5;
 laid = mix(laid * layPatch * (rndD < 0.22 ? 0.25 : 1.0), 1.0, pressed);
 float layAngle = laid * mix(1.1 + 0.5 * (rndB - 0.5), 1.38, pressed);
 // 寝た葉は、刈高と同じ高さに収まる分だけ長く見える
@@ -279,10 +281,6 @@ export class GrassBlades {
           '#include <common>\n' + GRASS_GLSL + '\nvarying vec3 vBladeRoot;\nvarying float vBladeT;\n'
         )
         .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_COLOR)
-        .replace(
-          '#include <opaque_fragment>',
-          '#include <opaque_fragment>\ngl_FragColor.rgb = mowApplyZone(gl_FragColor.rgb, vBladeRoot.xz);'
-        )
         .replace(
           '#include <normal_fragment_begin>',
           '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL

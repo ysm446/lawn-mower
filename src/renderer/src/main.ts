@@ -131,7 +131,6 @@ const ground = createGround(
   mowMap,
   terrain,
   grassField,
-  zoneOverlay.texture,
   GROUND_EXTENT,
   UNCUT_HEIGHT
 )
@@ -575,7 +574,6 @@ syncs.push(
     setZoneShow
   ),
   () => {
-    ground.uniforms.uZoneOverlay.value = zoning.show ? 1 : 0
     zoneOverlay.visible = zoning.show
   },
   zoneSlider('乗用機の上限', '乗用の芝刈り機で刈る勾配の上限', 'rideMaxDeg', 5, 30, 1, '°'),
