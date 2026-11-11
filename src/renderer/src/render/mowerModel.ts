@@ -1,5 +1,6 @@
-// 仮の芝刈り機モデル。寸法は実寸(m)。Blender 製のモデルができたら置き換える。
-// 原点は後輪軸の中央の接地点。+Z が前。
+// 芝刈り機のモデル。寸法は実寸(m)。原点は後輪軸の中央の接地点。+Z が前。
+// Blender で作ったモデル(tools/blender/build_mower.py が書き出す mower.glb)を読み込む。
+// 読み込みが終わるまで、または失敗したときは、箱を組み合わせた仮のモデルを表示する。
 
 import {
   BoxGeometry,
@@ -11,6 +12,8 @@ import {
   Vector3,
   type Object3D
 } from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import mowerUrl from '../assets/models/mower.glb?url'
 import type { Terrain } from '../sim/terrain'
 import type { VehicleParams, VehicleState } from '../sim/vehicle'
 
@@ -19,10 +22,11 @@ const TRACK = 1.3
 
 export class MowerModel {
   readonly root = new Group()
-  private readonly deck = new Group()
-  private readonly frontWheels: Object3D[] = []
-  private readonly allWheels: Mesh[] = []
-  private readonly reels: Mesh[] = []
+  private deck: Object3D = new Group()
+  private frontWheels: Object3D[] = []
+  private allWheels: Object3D[] = []
+  private reels: Object3D[] = []
+  private readonly placeholder = new Group()
   private deckLift = 0
   private readonly left = new Vector3()
   private readonly up = new Vector3()
@@ -52,7 +56,7 @@ export class MowerModel {
     const wheel = new Mesh(new CylinderGeometry(0.19, 0.19, 0.04, 20), darkMat)
     wheel.position.set(0, 1.5, 1.22)
     wheel.rotation.x = Math.PI / 2 - 0.5
-    this.root.add(body, hood, seat, seatBack, column, wheel)
+    this.placeholder.add(body, hood, seat, seatBack, column, wheel)
 
     const wheelGeo = new CylinderGeometry(wheelRadius, wheelRadius, 0.3, 24)
     wheelGeo.rotateZ(Math.PI / 2)
@@ -62,7 +66,7 @@ export class MowerModel {
         pivot.position.set((side * track) / 2, wheelRadius, z)
         const mesh = new Mesh(wheelGeo, darkMat)
         pivot.add(mesh)
-        this.root.add(pivot)
+        this.placeholder.add(pivot)
         this.allWheels.push(mesh)
         if (z > 0) this.frontWheels.push(pivot)
       }
@@ -89,14 +93,48 @@ export class MowerModel {
     arm.position.set(0, 0.42, -0.5)
     this.deck.add(arm)
     this.deck.position.set(0, 0, params.deckOffset)
-    this.root.add(this.deck)
+    this.placeholder.add(this.deck)
+    this.root.add(this.placeholder)
+    this.enableShadows(this.root)
+    this.loadModel()
+  }
 
-    this.root.traverse((obj) => {
+  private enableShadows(object: Object3D): void {
+    object.traverse((obj) => {
       if (obj instanceof Mesh) {
         obj.castShadow = true
         obj.receiveShadow = true
       }
     })
+  }
+
+  /** Blender 製のモデルを読み込み、仮のモデルと入れ替える */
+  private loadModel(): void {
+    new GLTFLoader().load(
+      mowerUrl,
+      (gltf) => {
+        const model = gltf.scene
+        const find = (name: string): Object3D | null => model.getObjectByName(name) ?? null
+        const deck = find('deck')
+        const wheels = ['wheel_rl', 'wheel_rr', 'wheel_fl', 'wheel_fr'].map(find)
+        const steers = ['steer_fl', 'steer_fr'].map(find)
+        const reels = ['reel_0', 'reel_1', 'reel_2'].map(find)
+        const parts = [deck, ...wheels, ...steers, ...reels]
+        if (parts.some((part) => part === null)) {
+          console.warn('mower.glb に必要な部品が見つからないため、仮のモデルを使います')
+          return
+        }
+        this.deck = deck as Object3D
+        this.allWheels = wheels as Object3D[]
+        this.frontWheels = steers as Object3D[]
+        this.reels = reels as Object3D[]
+        this.enableShadows(model)
+        this.root.remove(this.placeholder)
+        this.root.add(model)
+      },
+      undefined,
+      (error) => console.warn('mower.glb を読み込めないため、仮のモデルを使います', error)
+    )
   }
 
   /**

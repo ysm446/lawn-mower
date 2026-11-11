@@ -53,6 +53,9 @@ export class CameraRig {
   private chasePitch = 0
   private chaseDragging = false
   private chaseIdle = 0
+  // ホイールで変える距離の倍率(1 が初期の距離)。視点ごとに覚えておく
+  private chaseZoom = 1
+  private topZoom = 1
 
   constructor(domElement: HTMLElement) {
     this.camera.filmGauge = this.settings.sensorWidth
@@ -85,6 +88,21 @@ export class CameraRig {
       this.chaseIdle = 0
       if (domElement.hasPointerCapture(e.pointerId)) domElement.releasePointerCapture(e.pointerId)
     }
+    // ホイール: カメラを近づける、離す(画角は変えない)。ドローン視点は OrbitControls が受け持つ
+    domElement.addEventListener(
+      'wheel',
+      (e) => {
+        if (this.mode === 'orbit') return
+        e.preventDefault()
+        const factor = Math.exp(e.deltaY * 0.0012)
+        if (this.mode === 'chase') {
+          this.chaseZoom = Math.min(Math.max(this.chaseZoom * factor, 0.35), 8)
+        } else {
+          this.topZoom = Math.min(Math.max(this.topZoom * factor, 0.15), 4)
+        }
+      },
+      { passive: false }
+    )
     domElement.addEventListener('pointerup', endDrag)
     domElement.addEventListener('pointercancel', endDrag)
   }
@@ -136,10 +154,11 @@ export class CameraRig {
       }
       const yaw = state.heading + this.chaseYaw
       const elevation = CHASE_ELEVATION + this.chasePitch
-      const flat = Math.cos(elevation) * CHASE_RADIUS
+      const radius = CHASE_RADIUS * this.chaseZoom
+      const flat = Math.cos(elevation) * radius
       this.tmp.set(
         state.x - Math.sin(yaw) * flat,
-        ground + CHASE_PIVOT_HEIGHT + Math.sin(elevation) * CHASE_RADIUS,
+        ground + CHASE_PIVOT_HEIGHT + Math.sin(elevation) * radius,
         state.z - Math.cos(yaw) * flat
       )
       // ドラッグ中は手の動きにすぐついてくるようにする
@@ -165,7 +184,8 @@ export class CameraRig {
       this.controls.update()
       this.keepAboveGround(terrain)
     } else {
-      this.tmp.set(this.focus.x - 60, this.focus.y + 150, this.focus.z - 110)
+      const zoom = this.topZoom
+      this.tmp.set(this.focus.x - 60 * zoom, this.focus.y + 150 * zoom, this.focus.z - 110 * zoom)
       if (this.initialized) cam.position.lerp(this.tmp, Math.min(1, dt * 2))
       else cam.position.copy(this.tmp)
       cam.lookAt(this.focus)
