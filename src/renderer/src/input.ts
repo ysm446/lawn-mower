@@ -25,6 +25,11 @@ export class KeyboardInput {
     this.handlers.set(code, handler)
   }
 
+  /** キーが押されているか */
+  isDown(code: string): boolean {
+    return this.down.has(code)
+  }
+
   private axis(positive: string[], negative: string[]): number {
     const p = positive.some((c) => this.down.has(c)) ? 1 : 0
     const n = negative.some((c) => this.down.has(c)) ? 1 : 0

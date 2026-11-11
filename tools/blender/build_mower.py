@@ -13,6 +13,7 @@
 #   steer_2, steer_3, ... : 操舵する車輪の向きを変える軸(番号は車輪と同じ)
 #   deck                  : 刈刃のまとまり(上げ下げする)
 #   reel_0, reel_1, ...   : リール刃(X 軸まわりに回す)
+# 運転者の部品は driver の下にまとめる(アプリからは動かさない)。
 
 import json
 import math
@@ -125,6 +126,91 @@ def add_empty(name, location, parent=None):
     return obj
 
 
+def add_sphere(name, radius, location, material, parent=None, scale=(1, 1, 1), segments=20):
+    """球。scale は (左右, 前後, 上下) の倍率"""
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=segments, v_segments=segments // 2, radius=radius)
+    for vert in bm.verts:
+        vert.co = Vector((vert.co.x * scale[0], vert.co.y * scale[1], vert.co.z * scale[2]))
+    return finish_object(name, bm, location, material, parent)
+
+
+def add_limb(name, start, end, radius, material, parent=None):
+    """2 点を結ぶ丸棒(腕や脚)。両端を球で丸める"""
+    middle = (start + end) / 2
+    direction = end - start
+    limb = add_cylinder(name, radius, direction.length, middle, material, parent, "Z", segments=16)
+    limb.rotation_euler = Vector((0, 0, 1)).rotation_difference(direction.normalized()).to_euler()
+    add_sphere(name + "_a", radius * 1.04, start, material, parent, segments=16)
+    add_sphere(name + "_b", radius * 1.04, end, material, parent, segments=16)
+    return limb
+
+
+def add_driver(parent, materials):
+    """運転者(麦わら帽子のおじさん)。座席に座り、ハンドルを握る。寸法は座席とハンドルの位置に合わせてある"""
+    driver = add_empty("driver", Vector((0, 0, 0)), parent)
+
+    # ---- 胴体(少し後ろにもたれる。腹が出ている)
+    add_box("driver_hips", (0.38, 0.3, 0.2), at(0, 0.8, 1.16), materials["pants"], driver, 0.08)
+    add_box(
+        "driver_torso", (0.42, 0.25, 0.5), at(0, 0.74, 1.48), materials["shirt"], driver, 0.1,
+        rotation=(math.radians(-6), 0, 0),
+    )
+    add_sphere("driver_belly", 0.17, at(0, 0.84, 1.37), materials["shirt"], driver, scale=(1.05, 0.85, 1.0))
+
+    # ---- 頭
+    head = at(0, 0.76, 1.9)
+    add_cylinder("driver_neck", 0.055, 0.12, at(0, 0.75, 1.76), materials["skin"], driver, "Z", segments=16)
+    add_sphere("driver_head", 0.115, head, materials["skin"], driver, scale=(0.95, 1.0, 1.08))
+    add_sphere("driver_nose", 0.026, head + at(0, 0.115, -0.015), materials["skin"], driver, segments=12)
+    for side in (-1, 1):
+        add_sphere(f"driver_ear_{side}", 0.03, head + at(side * 0.108, 0.0, -0.01), materials["skin"], driver, scale=(0.5, 0.8, 1.0), segments=12)
+        add_sphere(f"driver_eye_{side}", 0.013, head + at(side * 0.042, 0.103, 0.022), materials["shoe"], driver, segments=10)
+        add_box(f"driver_brow_{side}", (0.045, 0.014, 0.012), head + at(side * 0.043, 0.104, 0.05), materials["hair"], driver, 0.004)
+    add_box("driver_mustache", (0.085, 0.022, 0.024), head + at(0, 0.108, -0.048), materials["hair"], driver, 0.008)
+    # 帽子の下からのぞく髪
+    add_sphere("driver_hair", 0.113, head + at(0, -0.035, 0.008), materials["hair"], driver, scale=(1.0, 0.9, 1.0))
+    # 首に巻いたタオル
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.085, minor_radius=0.03, major_segments=20, minor_segments=8)
+    towel = bpy.context.active_object
+    towel.name = "driver_towel"
+    towel.data.materials.append(materials["towel"])
+    for polygon in towel.data.polygons:
+        polygon.use_smooth = True
+    towel.parent = driver
+    towel.location = at(0, 0.76, 1.755)
+    towel.rotation_euler = (math.radians(-12), 0, 0)
+    for side in (-1, 1):
+        add_box(
+            f"driver_towel_end_{side}", (0.06, 0.025, 0.14), at(side * 0.055, 0.872, 1.675), materials["towel"], driver, 0.01,
+            rotation=(math.radians(8), math.radians(side * 14), 0),
+        )
+
+    # ---- 麦わら帽子(少し前に傾ける)
+    hat = add_empty("driver_hat", head + at(0, 0.0, 0.085), driver)
+    hat.rotation_euler = (math.radians(7), 0, 0)
+    add_cylinder("hat_brim", 0.235, 0.014, Vector((0, 0, 0)), materials["straw"], hat, "Z", bevel=0.005)
+    add_cylinder("hat_crown", 0.122, 0.11, Vector((0, 0, 0.055)), materials["straw"], hat, "Z", bevel=0.03, segments=24)
+    add_cylinder("hat_band", 0.126, 0.032, Vector((0, 0, 0.024)), materials["band"], hat, "Z", segments=24)
+
+    # ---- 腕(ハンドルの左右を握る)と脚(床に足を置く)
+    for side in (-1, 1):
+        shoulder = at(side * 0.245, 0.75, 1.67)
+        elbow = at(side * 0.3, 0.98, 1.44)
+        hand = at(side * 0.19, 1.28, 1.56)
+        add_limb(f"driver_upper_arm_{side}", shoulder, elbow, 0.055, materials["shirt"], driver)
+        add_limb(f"driver_forearm_{side}", elbow, hand, 0.045, materials["skin"], driver)
+        add_sphere(f"driver_glove_{side}", 0.058, hand, materials["towel"], driver, scale=(0.85, 1.0, 1.0), segments=14)
+
+        hip = at(side * 0.11, 0.86, 1.15)
+        knee = at(side * 0.24, 1.24, 1.17)
+        ankle = at(side * 0.34, 1.3, 0.78)
+        add_limb(f"driver_thigh_{side}", hip, knee, 0.085, materials["pants"], driver)
+        add_limb(f"driver_shin_{side}", knee, ankle, 0.065, materials["pants"], driver)
+        add_box(f"driver_shoe_{side}", (0.11, 0.27, 0.1), at(side * 0.34, 1.35, 0.71), materials["shoe"], driver, 0.035)
+    return driver
+
+
 def add_wheel(name, parent, materials, radius=WHEEL_RADIUS, width=WHEEL_WIDTH):
     """車輪。原点は車輪の中心。親の位置に置く"""
     tire = add_cylinder(name, radius, width, Vector((0, 0, 0)), materials["rubber"], parent, "X", bevel=0.07)
@@ -157,6 +243,14 @@ def build():
         "metal": make_material("metal", (0.55, 0.57, 0.6), 0.3, 1.0),
         "seat": make_material("seat", (0.05, 0.05, 0.055), 0.75),
         "lamp": make_material("lamp", (0.9, 0.88, 0.8), 0.15),
+        "skin": make_material("skin", (0.68, 0.42, 0.29), 0.65),
+        "shirt": make_material("shirt", (0.17, 0.29, 0.45), 0.8),
+        "pants": make_material("pants", (0.2, 0.17, 0.11), 0.85),
+        "shoe": make_material("shoe", (0.04, 0.035, 0.03), 0.7),
+        "hair": make_material("hair", (0.27, 0.27, 0.27), 0.8),
+        "straw": make_material("straw", (0.62, 0.43, 0.15), 0.85),
+        "band": make_material("band", (0.1, 0.05, 0.03), 0.7),
+        "towel": make_material("towel", (0.72, 0.72, 0.69), 0.9),
     }
 
     root = add_empty("mower", Vector((0, 0, 0)))
@@ -192,6 +286,9 @@ def build():
     steering.rotation_euler = (math.radians(-28), 0, 0)
     spoke = add_box("steering_spoke", (0.36, 0.035, 0.02), Vector((0, 0, 0)), materials["dark"], steering, 0.008)
     spoke.location = Vector((0, 0, 0))
+
+    # ---- 運転者
+    add_driver(root, materials)
 
     # ---- 転倒時に運転者を守る枠
     for side in (-1, 1):

@@ -786,6 +786,7 @@ const toggleHelp = setupHelp([
   {
     title: 'その他',
     items: [
+      { keys: ['L', '+', '左ドラッグ'], text: '太陽の向きを変える(左右で方位、上下で高度)' },
       { keys: [','], text: '設定ウインドウを開く、閉じる' },
       { keys: ['?'], text: 'この一覧を開く、閉じる' }
     ]
@@ -805,6 +806,47 @@ input.onPress('KeyP', () => setAutoDrive(!sim.autoDrive))
 input.onPress('KeyR', resetAll)
 input.onPress('KeyG', () => setRouteShow(!route.show))
 input.onPress('KeyZ', () => setZoneShow(!zoning.show))
+
+// L を押しながら左ドラッグ: 太陽の向きを変える。左右で方位、上下で高度。
+// 空をつかんで回す向きにしてある(右へ引くと、正面の太陽は右へ、手前に落ちる影も右へ動く)。
+// 視点のドラッグより先に受け取り、視点は動かさない
+{
+  const DEG_PER_PIXEL = 0.25
+  let sunPointer: number | null = null
+  canvas.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (e.button !== 0 || !input.isDown('KeyL')) return
+      e.stopImmediatePropagation()
+      e.preventDefault()
+      sunPointer = e.pointerId
+      canvas.setPointerCapture(e.pointerId)
+      canvas.style.cursor = 'grabbing'
+    },
+    { capture: true }
+  )
+  canvas.addEventListener(
+    'pointermove',
+    (e) => {
+      if (e.pointerId !== sunPointer) return
+      e.stopImmediatePropagation()
+      const s = lighting.settings
+      s.sunAzimuth = (((s.sunAzimuth - e.movementX * DEG_PER_PIXEL) % 360) + 360) % 360
+      s.sunElevation = Math.min(Math.max(s.sunElevation - e.movementY * DEG_PER_PIXEL, 3), 85)
+      syncUi()
+    },
+    { capture: true }
+  )
+  const endSunDrag = (e: PointerEvent): void => {
+    if (e.pointerId !== sunPointer) return
+    e.stopImmediatePropagation()
+    sunPointer = null
+    canvas.style.cursor = ''
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
+  }
+  canvas.addEventListener('pointerup', endSunDrag, { capture: true })
+  canvas.addEventListener('pointercancel', endSunDrag, { capture: true })
+}
 // 設定ウインドウ。セクション(タブ)ごとに項目を並べる
 function applySetting(key: keyof AppSettings): void {
   if (key === 'pixelRatio') resize()
