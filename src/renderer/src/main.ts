@@ -358,8 +358,25 @@ function assignPlot(unit: MowerUnit): void {
       best = plot.id
     }
   }
-  // 空いている区画がなければ、刈り終えていない区画を(重なってもよいので)受け持つ
-  if (best < 0) best = result.plots.find((p) => !plotting.done.has(p.id) && p.id !== unit.finishedPlot)?.id ?? -1
+  // 空いている区画がなければ、刈り終えていない区画のうち、受け持つ機体がいちばん少ない所に加わる(近い順)。
+  // 同じ区画を受け持った機体どうしは、列を分け合って刈る(teamOf)
+  if (best < 0) {
+    let fewest = Infinity
+    bestDistance = Infinity
+    for (const plot of result.plots) {
+      if (plotting.done.has(plot.id) || plot.id === unit.finishedPlot) continue
+      const count = mowers.filter((m) => m !== unit && m.autoDrive && m.plot === plot.id).length
+      const d = Math.hypot(
+        terrain.origin + plot.centerX * cell - unit.state.x,
+        terrain.origin + plot.centerZ * cell - unit.state.z
+      )
+      if (count < fewest || (count === fewest && d < bestDistance)) {
+        fewest = count
+        bestDistance = d
+        best = plot.id
+      }
+    }
+  }
   unit.plot = best
 }
 
@@ -380,7 +397,8 @@ function teamPlots(unit: MowerUnit): number[] {
  * (列の並びの左から順に、まとまりを割り振るため)。分担しないときは、その機体だけ
  */
 function teamOf(unit: MowerUnit): MowerUnit[] {
-  if (!plotting.teamwork || unit.plot < 0) return [unit]
+  // 「分担して刈る」がオフでも、区画が足りずに同じ区画を受け持ったときは分担する(同じ経路を重ねて走らないように)
+  if (unit.plot < 0) return [unit]
   const angle = (route.options.angleDeg * Math.PI) / 180
   const nx = Math.cos(angle)
   const nz = -Math.sin(angle)
@@ -394,7 +412,6 @@ function teamOf(unit: MowerUnit): MowerUnit[] {
  * 機体が抜けたときは作り直さない(残りの機体は、自分の分をそのまま刈る)。毎フレーム呼ぶ
  */
 function checkTeams(): void {
-  if (!plotting.teamwork) return
   for (const unit of mowers) {
     if (!unit.autoDrive || !unit.route.plan || unit.route.dirty) continue
     const team = teamOf(unit).map((m) => m.index)
@@ -442,7 +459,7 @@ function selectPlot(id: number): void {
 function finishPlot(unit: MowerUnit): void {
   if (unit.plot >= 0) {
     // 分担しているときは、組のほかの機体がまだ刈っていれば、区画はまだ刈り終えていない。自分は次の区画へ移る
-    const others = plotting.teamwork ? teamOf(unit).filter((m) => m !== unit) : []
+    const others = teamOf(unit).filter((m) => m !== unit)
     if (others.length > 0) {
       unit.finishedPlot = unit.plot
       unit.plot = -1
