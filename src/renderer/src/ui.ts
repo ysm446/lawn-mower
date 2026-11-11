@@ -294,3 +294,43 @@ export function setupHelp(sections: HelpSection[]): () => void {
   })
   return toggle
 }
+
+const EYE_ICON =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>' +
+  '<path class="eye-off" d="M4 4l16 16"/></svg>'
+
+/**
+ * パネルの見出しの行に、表示・非表示を切り替えるボタン(目のアイコン)を置く。
+ * パネルを閉じたままでも押せる。見出しを押すと、これまでどおりパネルが開いて設定が出る。
+ * ボタンは見出し(summary)の中には入れず、パネルの枠に重ねて置く(見出しの中に置くと、押したときにパネルも開閉する)
+ */
+export function addPanelToggle(
+  fold: HTMLElement,
+  label: string,
+  key: string,
+  get: () => boolean,
+  set: (value: boolean) => void
+): Sync {
+  const panel = fold.parentElement as HTMLElement
+  panel.classList.add('has-toggle')
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'panel-toggle'
+  button.innerHTML = EYE_ICON
+  button.addEventListener('click', () => {
+    set(!get())
+    sync()
+    button.blur() // Space などのキー操作がボタンに取られないようにする
+  })
+  panel.append(button)
+  const sync = (): void => {
+    const on = get()
+    button.setAttribute('aria-pressed', String(on))
+    const text = on ? `${label}を隠す(${key})` : `${label}を表示する(${key})`
+    button.title = text
+    button.setAttribute('aria-label', text)
+  }
+  sync()
+  return sync
+}

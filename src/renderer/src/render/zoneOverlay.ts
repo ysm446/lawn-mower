@@ -49,6 +49,9 @@ const LINE_LIFT = 0.32
 const OUTLINE_WIDTH = 3.5
 /** 輪郭線をならす回数。多いほどなめらかで、細かな出入りが消える */
 const OUTLINE_SMOOTHING = 6
+// 現れる時間と消える時間(秒)。経路の表示(pathLine.ts)と揃える
+const FADE_IN_SECONDS = 0.6
+const FADE_OUT_SECONDS = 0.45
 /** 塗りの三角形の辺の長さの上限(m)。地形に沿わせ、グラデーションをなめらかにする細かさ */
 const MAX_TRIANGLE_EDGE = 4
 /** 塗りの頂点の値の数の上限。これを超えたら、それ以上は細かく分けない(固まらないための歯止め) */
@@ -70,13 +73,14 @@ void main() {
 `
 
 const FILL_FS = /* glsl */ `
+uniform float uFade; // 全体の濃さ(0〜1)。現れるときと消えるときに変える
 varying float vEdge;
 varying float vWidth;
 varying vec3 vColor;
 void main() {
   float glow = clamp(exp(-max(vEdge, 0.0) / max(vWidth, 1.0)), 0.0, 1.0);
   float alpha = ${FILL_OPACITY.toFixed(2)} * (${FILL_FLOOR.toFixed(2)} + ${(1 - FILL_FLOOR).toFixed(2)} * glow);
-  gl_FragColor = vec4(vColor * (1.0 + glow * 0.25), alpha);
+  gl_FragColor = vec4(vColor * (1.0 + glow * 0.25), alpha * uFade);
 }
 `
 
@@ -104,9 +108,13 @@ export class ZoneOverlay {
   readonly lines = new Group()
   private readonly fill: Mesh
   private readonly outline = new Ribbon({ width: OUTLINE_WIDTH })
+  private readonly fade = { value: 0 }
+  private shown = false
+  private opacity = 0
 
   constructor(private readonly terrain: Terrain) {
     const material = new ShaderMaterial({
+      uniforms: { uFade: this.fade },
       vertexShader: FILL_VS,
       fragmentShader: FILL_FS,
       side: DoubleSide,
@@ -121,8 +129,23 @@ export class ZoneOverlay {
     this.lines.visible = false
   }
 
+  /** 表示するか。切り替えると、ふわっと現れ、ふわっと消える(tick で進める) */
   set visible(on: boolean) {
-    this.lines.visible = on
+    this.shown = on
+  }
+
+  /** 毎フレーム呼ぶ。現れたり消えたりする途中の濃さを進める */
+  tick(dt: number): void {
+    const target = this.shown ? 1 : 0
+    if (this.opacity !== target) {
+      const step = dt / (this.shown ? FADE_IN_SECONDS : FADE_OUT_SECONDS)
+      this.opacity = this.shown ? Math.min(1, this.opacity + step) : Math.max(0, this.opacity - step)
+    }
+    // 始まりと終わりをゆるやかにする
+    const eased = this.opacity * this.opacity * (3 - 2 * this.opacity)
+    this.fade.value = eased
+    this.outline.fade = eased
+    this.lines.visible = this.opacity > 0
   }
 
   /** 区分けの結果を表示に反映する */

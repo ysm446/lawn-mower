@@ -51,7 +51,7 @@ import {
   reelSegments,
   wheelPositions
 } from './sim/vehicle'
-import { addCheck, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
+import { addCheck, addPanelToggle, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
 
 // 単位はすべて実寸(1 = 1 m)
 const FIELD_SIZE = 512
@@ -630,15 +630,8 @@ function setZoneShow(on: boolean): void {
   syncUi()
 }
 syncs.push(
-  addSwitch(
-    byId('zone-switch'),
-    [
-      { value: false, label: '隠す', title: '区分けを表示しない(Z)' },
-      { value: true, label: '表示', title: '区分けを色と輪郭線で表示する(Z)' }
-    ],
-    () => zoning.show,
-    setZoneShow
-  ),
+  addPanelToggle(byId('zone-panel'), '区分け', 'Z', () => zoning.show, setZoneShow),
+
   () => {
     zoneOverlay.visible = zoning.show
   },
@@ -649,7 +642,6 @@ syncs.push(
   zoneSlider('整形', '周りの多数派に合わせて形を整える半径', 'majorityRadius', 0, 8, 1, ' m'),
   zoneSlider('最小の面積', 'これより狭い領域は周りの区分に吸収する', 'minArea', 0, 1000, 25, ' m²')
 )
-if (zoning.show) byId<HTMLDetailsElement>('zone-panel').open = true
 
 const setRouteReadout = addReadout(byId('route-readout'), {
   area: '刈る面積',
@@ -687,15 +679,8 @@ function setRouteShow(on: boolean): void {
   syncUi()
 }
 syncs.push(
-  addSwitch(
-    byId('route-switch'),
-    [
-      { value: false, label: '隠す', title: '経路を表示しない(G)' },
-      { value: true, label: '表示', title: '経路を線で表示する(G)。暗い線は刈刃を上げて移動する区間' }
-    ],
-    () => route.show,
-    setRouteShow
-  ),
+  addPanelToggle(byId('route-panel'), '経路', 'G', () => route.show, setRouteShow),
+
   () => {
     pathLine.visible = route.show
   },
@@ -716,7 +701,6 @@ syncs.push(
   routeSlider('重ねる幅', '隣の列と重ねる幅。刈り残しを防ぐ', 'overlap', 0, 1, 0.05, (v) => `${(v * 100).toFixed(0)} cm`),
   routeSlider('外周の周回', '最後に境界沿いを回る回数。旋回の場所にもなる', 'headlandPasses', 0, 5, 1, (v) => `${v.toFixed(0)} 周`)
 )
-if (route.show) byId<HTMLDetailsElement>('route-panel').open = true
 
 syncs.push(
   addSwitch(
@@ -1146,6 +1130,7 @@ function frame(now: number): void {
   // 後から読み込んだモデルの材質も、影の仕組みに対応させる
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
   pathLine.tick(dt)
+  zoneOverlay.tick(dt)
   pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
   grassBlades.update(rig.camera, bladeSettings.show)
   lighting.update(exposure, rig.camera.position)

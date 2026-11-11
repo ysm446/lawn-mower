@@ -302,6 +302,54 @@ button:active:not(:disabled) {
   transform: translateY(2px) rotate(-135deg);
 }
 
+/* 見出しの行の、表示・非表示を切り替えるボタン。パネルを閉じたままでも押せる */
+.side-panel.has-toggle {
+  position: relative;
+}
+
+/* ボタンの分だけ、見出しの文字と開閉の印の間を空ける */
+.side-panel.has-toggle .panel-fold > summary::after {
+  margin-left: 34px;
+}
+
+.panel-toggle {
+  position: absolute;
+  top: 9px;
+  right: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  min-height: 0;
+  padding: 0;
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.side-panel:has(> .panel-fold:not([open])) > .panel-toggle {
+  top: 5px;
+}
+
+.panel-toggle:hover {
+  color: var(--text);
+  background: var(--field);
+}
+
+/* 表示中は明るくする。非表示のときは、目に斜線を入れる */
+.panel-toggle[aria-pressed='true'] {
+  color: var(--text);
+  background: rgba(178, 178, 178, 0.26);
+  border-color: var(--line);
+}
+
+.panel-toggle[aria-pressed='true'] .eye-off {
+  display: none;
+}
+
 .field-list {
   display: grid;
   grid-template-columns: max-content 1fr auto;
