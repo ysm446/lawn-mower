@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import appIcon from '../../resources/icons/lawn-mower-overhead.png?asset'
 
 // 動作確認用の環境変数:
 //   LM_QUERY            レンダラーに渡すクエリ文字列(例: "auto=1&timescale=16&cam=orbit")
@@ -14,6 +15,7 @@ function createWindow(): void {
   const win = new BrowserWindow({
     width: 1600,
     height: 900,
+    icon: appIcon,
     backgroundColor: '#000000',
     autoHideMenuBar: true,
     webPreferences: {
