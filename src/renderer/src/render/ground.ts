@@ -19,6 +19,13 @@ export interface GroundUniforms {
   uTilt: { value: number }
   /** 区分けの色を重ねる強さ(0 で表示しない) */
   uZoneOverlay: { value: number }
+  /** 近景の芝の葉を描く範囲の中心(x, z) */
+  uBladeCenter: { value: Vector2 }
+  /** その半径(m) */
+  uBladeRadius: { value: number }
+  /** 葉の濃さ(0 で葉なし) */
+  uBladeAmount: { value: number }
+  [name: string]: { value: unknown }
 }
 
 export interface Ground {
@@ -26,7 +33,11 @@ export interface Ground {
   uniforms: GroundUniforms
 }
 
-const FRAGMENT_HEADER = /* glsl */ `
+/**
+ * 芝の色を求める GLSL。地面と、近景の芝の葉(grassBlades.ts)の両方で使う。
+ * 同じ式を使うことで、葉のある範囲と無い範囲の色がつながる。
+ */
+export const GRASS_GLSL = /* glsl */ `
 uniform sampler2D uMowMap;
 uniform vec2 uMowOrigin;
 uniform float uMowSize;
@@ -38,7 +49,9 @@ uniform sampler2D uZoneMap;
 uniform float uZoneOrigin;
 uniform float uZoneSize;
 uniform float uZoneOverlay;
-varying vec3 vMowWorld;
+uniform vec2 uBladeCenter;
+uniform float uBladeRadius;
+uniform float uBladeAmount;
 
 float mowHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -56,42 +69,59 @@ float mowNoise(vec2 p) {
   float d = mowHash(i + vec2(1.0, 1.0));
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
+
+// 芝状態マップの値。範囲の外は刈っていない芝として扱う
+vec4 mowSample(vec2 xz) {
+  vec2 uv = (xz - uMowOrigin) / uMowSize;
+  vec4 state = vec4(0.5, 0.5, 0.0, uUncutNorm);
+  if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) state = texture2D(uMowMap, uv);
+  return state;
+}
+
+// 近景の芝の葉を描く範囲の濃さ(中心で 1、縁で 0)
+float bladeCoverage(vec2 xz) {
+  return uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, length(xz - uBladeCenter)));
+}
+
+vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
+  vec2 lean = state.rg * 2.0 - 1.0;
+  float height = state.a * uMaxHeight;
+
+  float dist = length(world - eye);
+  float nLarge = mowNoise(world.xz * 0.07);
+  float nMid = mowNoise(world.xz * 1.3);
+  float nFine = mowNoise(world.xz * 31.0);
+  float fineFade = 1.0 - smoothstep(15.0, 70.0, dist);
+
+  // 伸びた芝は暗く黄みがかってむらがあり、刈った芝は明るく均一
+  vec3 longColor = mix(vec3(0.060, 0.115, 0.022), vec3(0.135, 0.185, 0.040), nLarge * 0.6 + nMid * 0.4);
+  vec3 cutColor = mix(vec3(0.074, 0.185, 0.028), vec3(0.092, 0.212, 0.035), nLarge);
+  float tall = smoothstep(0.02, 0.06, height);
+  vec3 color = mix(cutColor, longColor, tall);
+  color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
+
+  // 縞: 倒れた向きと視線の向きの関係で明暗をつける
+  vec3 toFrag = normalize(world - eye);
+  color *= 1.0 + uStripe * dot(lean, toFrag.xz);
+
+  // 区分けの色を重ねる
+  vec2 zoneUv = (world.xz - uZoneOrigin) / uZoneSize;
+  if (uZoneOverlay > 0.0 && zoneUv.x > 0.0 && zoneUv.x < 1.0 && zoneUv.y > 0.0 && zoneUv.y < 1.0) {
+    vec4 zoneColor = texture2D(uZoneMap, zoneUv);
+    color = mix(color, zoneColor.rgb * 0.6, zoneColor.a * uZoneOverlay);
+  }
+  return color;
+}
 `
 
+const FRAGMENT_HEADER = GRASS_GLSL + '\nvarying vec3 vMowWorld;\n'
+
 const FRAGMENT_COLOR = /* glsl */ `
-vec2 mowUv = (vMowWorld.xz - uMowOrigin) / uMowSize;
-vec4 mowState = vec4(0.5, 0.5, 0.0, uUncutNorm);
-if (mowUv.x > 0.0 && mowUv.x < 1.0 && mowUv.y > 0.0 && mowUv.y < 1.0) {
-  mowState = texture2D(uMowMap, mowUv);
-}
+vec4 mowState = mowSample(vMowWorld.xz);
 vec2 mowLean = mowState.rg * 2.0 - 1.0;
-float mowHeight = mowState.a * uMaxHeight;
-
-float mowDist = length(vMowWorld - cameraPosition);
-float nLarge = mowNoise(vMowWorld.xz * 0.07);
-float nMid = mowNoise(vMowWorld.xz * 1.3);
-float nFine = mowNoise(vMowWorld.xz * 31.0);
-float fineFade = 1.0 - smoothstep(15.0, 70.0, mowDist);
-
-// 伸びた芝は暗く黄みがかってむらがあり、刈った芝は明るく均一
-vec3 longColor = mix(vec3(0.060, 0.115, 0.022), vec3(0.135, 0.185, 0.040), nLarge * 0.6 + nMid * 0.4);
-vec3 cutColor = mix(vec3(0.074, 0.185, 0.028), vec3(0.092, 0.212, 0.035), nLarge);
-float tall = smoothstep(0.02, 0.06, mowHeight);
-vec3 grassColor = mix(cutColor, longColor, tall);
-grassColor *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
-
-// 縞: 倒れた向きと視線の向きの関係で明暗をつける
-vec3 mowToFrag = normalize(vMowWorld - cameraPosition);
-float stripe = dot(mowLean, mowToFrag.xz);
-grassColor *= 1.0 + uStripe * stripe;
-
-// 区分けの色を重ねる
-vec2 zoneUv = (vMowWorld.xz - uZoneOrigin) / uZoneSize;
-if (uZoneOverlay > 0.0 && zoneUv.x > 0.0 && zoneUv.x < 1.0 && zoneUv.y > 0.0 && zoneUv.y < 1.0) {
-  vec4 zoneColor = texture2D(uZoneMap, zoneUv);
-  grassColor = mix(grassColor, zoneColor.rgb * 0.6, zoneColor.a * uZoneOverlay);
-}
-
+vec3 grassColor = mowGrassColor(vMowWorld, mowState, cameraPosition);
+// 芝の葉を描く範囲では、葉の根元の陰として地面を少し暗くする
+grassColor *= 1.0 - 0.22 * bladeCoverage(vMowWorld.xz);
 diffuseColor.rgb = grassColor;
 `
 
@@ -169,7 +199,7 @@ export function createGround(
   uncutHeight: number
 ): Ground {
   const o = mowMap.options
-  const uniforms = {
+  const uniforms: GroundUniforms = {
     uMowMap: { value: mowMap.texture },
     uMowOrigin: { value: new Vector2(o.originX, o.originZ) },
     uMowSize: { value: o.size },
@@ -181,7 +211,10 @@ export function createGround(
     // テクセルの中心が格子点に重なるように、半マス分だけ広く取る
     uZoneOrigin: { value: terrain.origin - terrain.options.cell / 2 },
     uZoneSize: { value: terrain.options.size + terrain.options.cell },
-    uZoneOverlay: { value: 0 }
+    uZoneOverlay: { value: 0 },
+    uBladeCenter: { value: new Vector2() },
+    uBladeRadius: { value: 1 },
+    uBladeAmount: { value: 0 }
   }
 
   const material = new MeshStandardMaterial({ roughness: 0.95, metalness: 0 })

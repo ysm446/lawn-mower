@@ -14,6 +14,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { KeyboardInput } from './input'
 import { CAMERA_MODES, CAMERA_MODE_LABELS, CameraRig, type CameraMode } from './render/cameraRig'
+import { GrassBlades } from './render/grassBlades'
 import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
@@ -106,6 +107,11 @@ scene.add(zoneOverlay.lines)
 
 const ground = createGround(mowMap, terrain, zoneOverlay.texture, GROUND_EXTENT, UNCUT_HEIGHT)
 scene.add(ground.mesh)
+
+// 近景の芝の葉。?blades=0 で描かない
+const grassBlades = new GrassBlades(terrain, ground.uniforms)
+const bladeSettings = { show: query.get('blades') !== '0' }
+scene.add(grassBlades.mesh)
 
 // 勾配による区分け。設定を変えたら次のフレームで計算し直す
 const zoning = {
@@ -425,6 +431,15 @@ syncs.push(
 
 const grassFields = byId('grass-fields')
 syncs.push(
+  addCheck(
+    grassFields,
+    '芝の葉',
+    '機体のまわりの芝を、葉の 1 枚ずつまで描きます。重いときは外してください',
+    () => bladeSettings.show,
+    (v) => {
+      bladeSettings.show = v
+    }
+  ),
   addSlider(grassFields, {
     label: '縞(視線)',
     title: '芝の倒れた向きと、見る向きの関係でつく明暗の強さ',
@@ -657,7 +672,7 @@ const toggleHelp = setupHelp([
     title: '視点',
     items: [
       { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰)' },
-      { keys: ['左ドラッグ'], text: 'ドローン視点で回り込む' },
+      { keys: ['左ドラッグ'], text: '機体を中心に回り込む(追従視点では、離して 2 秒で背後に戻る)' },
       { keys: ['ホイール'], text: 'ドローン視点で近づく、離れる' }
     ]
   },
@@ -805,6 +820,7 @@ function frame(now: number): void {
   mower.sync(sim.state, dt * sim.timeScale, terrain)
   rig.update(sim.state, dt, terrain)
   const exposure = rig.exposure
+  grassBlades.update(rig.focusPoint, rig.camera.position, bladeSettings.show)
   lighting.update(exposure, rig.focusPoint, rig.camera.position)
 
   // ピントは機体に合わせる。視線に沿った距離で持つ

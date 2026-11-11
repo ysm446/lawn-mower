@@ -13,6 +13,15 @@ import type { VehicleState } from '../sim/vehicle'
 /** カメラが地面に潜らないように保つ、地面からの最低の高さ(m) */
 const MIN_CLEARANCE = 1.2
 
+// 追従視点: 機体の少し上の点を中心に、後ろ斜め上から見る
+const CHASE_PIVOT_HEIGHT = 0.6
+const CHASE_BACK = 9
+const CHASE_UP = 3.6
+const CHASE_RADIUS = Math.hypot(CHASE_BACK, CHASE_UP)
+const CHASE_ELEVATION = Math.atan2(CHASE_UP, CHASE_BACK)
+/** ドラッグをやめてから、背後に戻り始めるまでの時間(秒) */
+const CHASE_RETURN_DELAY = 2
+
 export type CameraMode = 'chase' | 'orbit' | 'top'
 
 export const CAMERA_MODES: CameraMode[] = ['chase', 'orbit', 'top']
@@ -39,6 +48,11 @@ export class CameraRig {
   private readonly lastFocus = new Vector3()
   private readonly tmp = new Vector3()
   private initialized = false
+  // 追従視点でドラッグして回した分。手を離してしばらくすると 0 に戻る
+  private chaseYaw = 0
+  private chasePitch = 0
+  private chaseDragging = false
+  private chaseIdle = 0
 
   constructor(domElement: HTMLElement) {
     this.camera.filmGauge = this.settings.sensorWidth
@@ -49,6 +63,30 @@ export class CameraRig {
     this.controls.maxDistance = 600
     this.controls.enabled = false
     this.setMode('chase')
+
+    // 追従視点の左ドラッグ: 機体を中心に回り込む
+    domElement.addEventListener('pointerdown', (e) => {
+      if (this.mode !== 'chase' || e.button !== 0) return
+      this.chaseDragging = true
+      domElement.setPointerCapture(e.pointerId)
+    })
+    domElement.addEventListener('pointermove', (e) => {
+      if (!this.chaseDragging) return
+      const scale = (Math.PI * 2) / domElement.clientHeight
+      this.chaseYaw -= e.movementX * scale
+      this.chasePitch += e.movementY * scale
+      const lo = (4 * Math.PI) / 180 - CHASE_ELEVATION
+      const hi = (80 * Math.PI) / 180 - CHASE_ELEVATION
+      this.chasePitch = Math.min(Math.max(this.chasePitch, lo), hi)
+    })
+    const endDrag = (e: PointerEvent): void => {
+      if (!this.chaseDragging) return
+      this.chaseDragging = false
+      this.chaseIdle = 0
+      if (domElement.hasPointerCapture(e.pointerId)) domElement.releasePointerCapture(e.pointerId)
+    }
+    domElement.addEventListener('pointerup', endDrag)
+    domElement.addEventListener('pointercancel', endDrag)
   }
 
   get exposure(): number {
@@ -59,6 +97,9 @@ export class CameraRig {
     this.mode = mode
     this.settings.focalLength = MODE_FOCAL_LENGTH[mode]
     this.controls.enabled = mode === 'orbit'
+    this.chaseYaw = 0
+    this.chasePitch = 0
+    this.chaseDragging = false
     this.initialized = false
   }
 
@@ -82,13 +123,35 @@ export class CameraRig {
     this.focus.set(state.x + fx * 1.2, ground + 0.8, state.z + fz * 1.2)
 
     if (this.mode === 'chase') {
-      this.tmp.set(state.x - fx * 9, ground + 4.2, state.z - fz * 9)
-      if (this.initialized) cam.position.lerp(this.tmp, Math.min(1, dt * 3))
+      // 手を離してしばらくしたら、回した分をなめらかに戻して背後に回る
+      if (!this.chaseDragging) {
+        this.chaseIdle += dt
+        if (this.chaseIdle > CHASE_RETURN_DELAY) {
+          // 遠回りしないように、半周を超えた分は反対回りに直す
+          this.chaseYaw = Math.atan2(Math.sin(this.chaseYaw), Math.cos(this.chaseYaw))
+          const keep = Math.exp(-dt * 2.5)
+          this.chaseYaw *= keep
+          this.chasePitch *= keep
+        }
+      }
+      const yaw = state.heading + this.chaseYaw
+      const elevation = CHASE_ELEVATION + this.chasePitch
+      const flat = Math.cos(elevation) * CHASE_RADIUS
+      this.tmp.set(
+        state.x - Math.sin(yaw) * flat,
+        ground + CHASE_PIVOT_HEIGHT + Math.sin(elevation) * CHASE_RADIUS,
+        state.z - Math.cos(yaw) * flat
+      )
+      // ドラッグ中は手の動きにすぐついてくるようにする
+      const follow = this.chaseDragging ? 14 : 3
+      if (this.initialized) cam.position.lerp(this.tmp, Math.min(1, dt * follow))
       else cam.position.copy(this.tmp)
       this.keepAboveGround(terrain)
-      const aheadX = state.x + fx * 4
-      const aheadZ = state.z + fz * 4
-      cam.lookAt(aheadX, terrain.heightAt(aheadX, aheadZ) + 0.6, aheadZ)
+      // 背後から見るときは機体の少し先を、回り込んだときは機体そのものを見る
+      const lead = 4 * Math.max(0, Math.cos(this.chaseYaw))
+      const aheadX = state.x + fx * lead
+      const aheadZ = state.z + fz * lead
+      cam.lookAt(aheadX, terrain.heightAt(aheadX, aheadZ) + CHASE_PIVOT_HEIGHT, aheadZ)
     } else if (this.mode === 'orbit') {
       if (!this.initialized) {
         cam.position.set(this.focus.x - 38, 26, this.focus.z - 46)
