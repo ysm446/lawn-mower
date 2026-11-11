@@ -20,6 +20,26 @@ export interface SliderSpec {
   get: () => number
   set: (value: number) => void
   format: (value: number) => string
+  /** 既定値。省くと、作った時点の値を既定値にする。状況で変わるものは関数で渡す */
+  defaultValue?: () => number
+}
+
+const RESET_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>'
+
+/** 「既定に戻す」ボタン。値が既定値のときは押せない(薄く表示する) */
+function resetButton(label: string, onReset: () => void): HTMLButtonElement {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'reset-button'
+  button.title = '既定に戻す'
+  button.setAttribute('aria-label', `${label}を既定に戻す`)
+  button.innerHTML = RESET_ICON
+  button.addEventListener('click', () => {
+    onReset()
+    button.blur() // Space などのキー操作がボタンに取られないようにする
+  })
+  return button
 }
 
 /** ラベル、スライダー、値の表示を 1 行として追加する */
@@ -42,12 +62,19 @@ export function addSlider(parent: HTMLElement, spec: SliderSpec): Sync {
   const output = document.createElement('output')
   output.htmlFor.add(id)
   row.append(input, output)
-  parent.append(label, row)
+  const initial = spec.get()
+  const defaultValue = spec.defaultValue ?? (() => initial)
+  const reset = resetButton(spec.label, () => {
+    spec.set(defaultValue())
+    sync()
+  })
+  parent.append(label, row, reset)
 
   const show = (value: number): void => {
     const fill = ((value - spec.min) / (spec.max - spec.min)) * 100
     input.style.setProperty('--fill', `${Math.min(Math.max(fill, 0), 100)}%`)
     output.textContent = spec.format(value)
+    reset.disabled = Math.abs(value - defaultValue()) < spec.step / 2
   }
   input.addEventListener('input', () => {
     spec.set(Number(input.value))
@@ -85,7 +112,7 @@ export function stopsSlider(
     max: stops.length - 1,
     step: 1,
     get: () => nearest(get()),
-    set: (i) => set(stops[i]),
+    set: (i) => set(stops[Math.round(i)]),
     format: (i) => format(stops[i])
   }
 }
@@ -104,13 +131,20 @@ export function addCheck(
   const input = document.createElement('input')
   input.type = 'checkbox'
   row.append(input, label)
-  parent.append(row)
+  const initial = get()
+  const reset = resetButton(label, () => {
+    set(initial)
+    sync()
+  })
+  parent.append(row, reset)
   input.addEventListener('change', () => {
     set(input.checked)
+    reset.disabled = input.checked === initial
     input.blur() // Space などのキー操作がチェックに取られないようにする
   })
   const sync = (): void => {
     input.checked = get()
+    reset.disabled = input.checked === initial
   }
   sync()
   return sync

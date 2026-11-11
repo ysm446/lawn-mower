@@ -325,7 +325,9 @@ syncs.push(
     set: (t) => {
       rig.settings.focalLength = Math.round(FOCAL_MIN * Math.exp(t * focalRange))
     },
-    format: (t) => `${Math.round(FOCAL_MIN * Math.exp(t * focalRange))} mm`
+    format: (t) => `${Math.round(FOCAL_MIN * Math.exp(t * focalRange))} mm`,
+    // 視点ごとに初期値が違う
+    defaultValue: () => Math.log(rig.defaultFocalLength / FOCAL_MIN) / focalRange
   }),
   addSlider(
     cameraFields,

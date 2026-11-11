@@ -107,6 +107,14 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
   color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
 
+  // 色相のむら。数 m ごとの株のかたまりと、数十 m の広がりで、黄みと青みの間を揺らす。
+  // 近くでは葉の 1 枚ごとにも少し変える
+  float hue = mowNoise(world.xz * 0.42 + 13.1) * 0.5 + mowNoise(world.xz * 0.06 + 71.9) * 0.5 - 0.5;
+  hue += (mowNoise(world.xz * 23.0 + 5.7) - 0.5) * 0.7 * fineFade;
+  vec3 warm = vec3(1.26, 1.05, 0.70);
+  vec3 cool = vec3(0.78, 0.97, 1.22);
+  color *= mix(cool, warm, clamp(0.5 + hue * 1.5, 0.0, 1.0));
+
   // 縞: 倒れた向きと視線の向きの関係で明暗をつける
   vec3 toFrag = normalize(world - eye);
   color *= 1.0 + uStripe * dot(lean, toFrag.xz);

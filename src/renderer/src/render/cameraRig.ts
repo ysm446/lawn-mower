@@ -107,6 +107,11 @@ export class CameraRig {
     domElement.addEventListener('pointercancel', endDrag)
   }
 
+  /** 今の視点での焦点距離の初期値(mm) */
+  get defaultFocalLength(): number {
+    return MODE_FOCAL_LENGTH[this.mode]
+  }
+
   get exposure(): number {
     return exposureFromSettings(this.settings)
   }
