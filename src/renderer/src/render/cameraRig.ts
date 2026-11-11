@@ -214,6 +214,16 @@ export class CameraRig {
     this.camera.position.setFromSpherical(this.arm).add(target)
   }
 
+  /**
+   * 追従視点の、回り込む角度と見上げ下げの角度(度)を決める(動作確認用)。
+   * ドラッグするまでは、背後へ戻らずにその向きを保つ
+   */
+  setChaseAngles(yawDeg: number, pitchDeg: number): void {
+    this.chaseYaw = (yawDeg * Math.PI) / 180
+    this.chasePitch = (pitchDeg * Math.PI) / 180
+    this.chaseIdle = -Infinity
+  }
+
   /** 追従視点と俯瞰の距離の倍率を決める(動作確認用) */
   setZoom(zoom: number): void {
     this.chaseZoom = zoom

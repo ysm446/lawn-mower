@@ -1,7 +1,7 @@
 # ui — UI の設計ガイド
 
 作成日時: 2026-11-11 05:28
-更新日時: 2026-11-11 19:21
+更新日時: 2026-11-11 20:28
 
 UI は別プロジェクト weather-globe(`D:\GitHub\weather-globe`)の流儀に合わせる。新しい部品を足すときは、まず weather-globe の `src/renderer/style.css` と `index.html` に同じ役割のものがないかを見て、あればその見た目と作りに合わせる。
 
@@ -65,6 +65,11 @@ UI は別プロジェクト weather-globe(`D:\GitHub\weather-globe`)の流儀に
 - 向きのある道筋は、太さのある矢印(`buildThickArrow`)で描く。帯は一定の太さで、先端に幅の広い矢じりを付ける。
 - 推定や補助的な道筋(刈刃を上げた移動など)は破線にする。
 - 色は `OVERLAY_PALETTE`(彩度を少し落とし、明るさをそろえた色)から選ぶ。
+
+## 画面に重ねる補助の表示
+
+- 太陽の向きのギズモ(`sunGizmo.ts`)は、terrain-graph(`D:\GitHub\terrain-graph`)の絵に合わせる。操作している間だけ出し、やめたら薄くなって消える。
+- 線の色は意味を持つ色として固定し、`style.css` の変数からは引かない(案内の線は灰、高度の弧は淡い橙、光の矢印は橙)。数字の箱は `--panel-strong` を使う。
 
 ## weather-globe から今後取り入れる候補
 

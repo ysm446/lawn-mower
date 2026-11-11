@@ -227,6 +227,30 @@ button:active:not(:disabled) {
   border-radius: 8px;
 }
 
+/* 太陽の向きのギズモ。画面の全体に重ね、操作は後ろの画面へ通す */
+#sun-gizmo {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}
+
+#sun-gizmo-label {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+  background: var(--panel-strong);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
 /* ------------------------------------------------ 右の列: 設定のパネル */
 
 #right-stack {

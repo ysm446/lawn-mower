@@ -1,10 +1,10 @@
-// 太陽、空、雲、霧。明るさは現実に近い単位(照度 lx、輝度 cd/m²)で持ち、
+// 太陽、空、雲、霞。明るさは現実に近い単位(照度 lx、輝度 cd/m²)で持ち、
 // 描画の前にカメラの露出を掛ける。こうすると描画バッファの値が扱いやすい範囲に収まる。
+// 空の色、太陽の色と明るさ、空からの環境光、霞の色は、どれも大気散乱の計算(atmosphere.ts)から決まる。
 
 import {
   BackSide,
   Color,
-  FogExp2,
   HemisphereLight,
   Material,
   Mesh,
@@ -15,19 +15,26 @@ import {
   ShaderMaterial,
   SphereGeometry,
   Vector2,
-  Vector3
+  Vector3,
+  type WebGLRenderer
 } from 'three'
 import { CSM } from 'three/addons/csm/CSM.js'
+import { MIE_BETA, MIE_EXTINCTION, RAYLEIGH_BETA, SOLAR_ILLUMINANCE, sunTransmittance } from '../sim/atmosphere'
+import { Atmosphere, SKY_LOOKUP_GLSL } from './atmosphere'
 
 /** 影を描く距離の上限(m)。これより遠くには影が落ちない */
 const SHADOW_DISTANCE = 220
 /** 影の段数。近くほど細かい影の地図を使う(カスケードシャドウマップ) */
 const SHADOW_CASCADES = 3
-const SUN_COLOR = new Color(1.0, 0.94, 0.84)
-/** 低い太陽の色。高度が下がるほど、この色に寄る */
-const LOW_SUN_COLOR = new Color(1.0, 0.6, 0.3)
-/** この高度(度)より低いと、太陽の光が赤みを帯びて弱くなる */
-const WARM_BELOW_DEG = 22
+/**
+ * 霞を、実際の大気より何倍濃く掛けるか。実際の大気では数 km 先でもほとんど霞まないが、
+ * この場面は数百 m から数 km の広さなので、遠近感が出るように濃くする
+ */
+const AERIAL_BOOST = 5
+/** 空の表を作り直す間隔の下限(ミリ秒)。太陽が動き続けるときも、これより細かくは作り直さない */
+const SKY_UPDATE_INTERVAL = 50
+/** 芝地のおおよその反射率。地面からの照り返しの色に使う */
+const GROUND_ALBEDO = new Color(0.1, 0.2, 0.04)
 /** 雲の高さ(m)と、雲のかたまりの大きさの目安(m)、風の強さ 1 での流れる速さ(m/s) */
 const CLOUD_HEIGHT = 1200
 const CLOUD_SIZE = 520
@@ -40,10 +47,10 @@ export interface LightingSettings {
   sunElevation: number
   /** 太陽の方位(度)。+Z から +X 方向へ測る */
   sunAzimuth: number
-  /** 太陽光の照度(lx)。光に垂直な面での値 */
+  /** 大気の外での太陽の照度(lx)。地表での照度と色は、大気を抜ける間の減り方から決まる */
   sunIlluminance: number
-  /** 空からの照度(lx) */
-  skyIlluminance: number
+  /** 霞の濃さ(ミー散乱の倍率)。大きいほど空が白っぽく、遠くが霞み、低い太陽が弱く赤くなる */
+  haze: number
   /** 雲の量(0 で快晴、1 でほぼ曇り) */
   cloudCover: number
 }
@@ -51,16 +58,10 @@ export interface LightingSettings {
 export const DEFAULT_LIGHTING: LightingSettings = {
   sunElevation: 28,
   sunAzimuth: 125,
-  sunIlluminance: 90000,
-  skyIlluminance: 18000,
+  sunIlluminance: SOLAR_ILLUMINANCE,
+  haze: 3,
   cloudCover: 0.35
 }
-
-// 空の輝度(cd/m²)
-const ZENITH_LUMINANCE = new Color(900, 2100, 5200)
-const HORIZON_LUMINANCE = new Color(6200, 7400, 8600)
-// 太陽が低いときの地平線の輝度
-const LOW_HORIZON_LUMINANCE = new Color(7600, 5600, 3600)
 
 // 雲の濃さ。空に見える雲と、地面に落ちる雲の影で同じものを使うので、雲と影の位置が合う
 const CLOUD_GLSL = /* glsl */ `
@@ -123,6 +124,24 @@ const CLOUD_FRAGMENT = /* glsl */ `
 }
 `
 
+// 霞(空気遠近法)。遠くの物ほど、その向きの地平線の空の色に溶ける。
+// 一様な空気の中を水平に見通すと、途中で散らばって目に届く光は「その向きの地平線の空の輝度 × (1 - 透過率)」
+// になるので、霞の色には空の表の地平線の値を使う。青ほど強く散るので、遠くは青みがかり、太陽の側は明るい
+const AERIAL_HEADER = /* glsl */ `
+uniform vec3 uAerialExtinction;
+uniform float uSkyScale;
+`
+const AERIAL_FRAGMENT = /* glsl */ `
+{
+  vec3 aerialRay = vCloudWorld - cameraPosition;
+  float aerialDistance = length(aerialRay);
+  vec3 aerialDir = aerialRay / max(aerialDistance, 1e-3);
+  vec3 aerialSky = atmosphereSky(normalize(vec3(aerialDir.x, max(aerialDir.y, 0.015), aerialDir.z))) * uSkyScale;
+  vec3 aerialTransmittance = exp(-uAerialExtinction * aerialDistance);
+  gl_FragColor.rgb = gl_FragColor.rgb * aerialTransmittance + aerialSky * (1.0 - aerialTransmittance);
+}
+`
+
 const SKY_VERTEX = /* glsl */ `
 varying vec3 vDir;
 void main() {
@@ -132,32 +151,35 @@ void main() {
 `
 
 const SKY_FRAGMENT = /* glsl */ `
-uniform vec3 uZenith;
-uniform vec3 uHorizon;
 uniform vec3 uSunDir;
+uniform vec3 uSunDisc;
 uniform vec3 uCloudLit;
+uniform float uSkyScale;
 uniform float uExposure;
 varying vec3 vDir;
 ${CLOUD_GLSL}
+${SKY_LOOKUP_GLSL}
 void main() {
   vec3 dir = normalize(vDir);
-  float t = pow(clamp(dir.y, 0.0, 1.0), 0.45);
-  vec3 sky = mix(uHorizon, uZenith, t);
+  // 空の輝度は、大気散乱の表から引く(地平線より下は、地平線の色で埋める)
+  vec3 sky = atmosphereSky(vec3(dir.x, max(dir.y, 0.0), dir.z)) * uSkyScale;
   float sunAmount = max(dot(dir, uSunDir), 0.0);
-  sky += uHorizon * 1.5 * pow(sunAmount, 24.0);
   // 雲。視線が雲の高さの面に当たる所の濃さを見る。地平線の近くは霞に溶かす
   float cloud = 0.0;
   if (dir.y > 0.0) {
     vec2 hit = cameraPosition.xz + dir.xz / max(dir.y, 0.02) * (${CLOUD_HEIGHT.toFixed(1)} - cameraPosition.y);
     cloud = cloudDensity(hit) * smoothstep(0.03, 0.18, dir.y);
-    vec3 cloudColor = uCloudLit * mix(1.0, 0.55, cloud);
-    cloudColor += uCloudLit * 0.8 * pow(sunAmount, 8.0);
+    // 空の輝度(uSkyScale を掛けた値)は露出を掛け終えているので、雲の輝度にもここで露出を掛ける
+    vec3 cloudColor = uCloudLit * uExposure * mix(1.0, 0.55, cloud);
+    cloudColor += uCloudLit * uExposure * 0.8 * pow(sunAmount, 8.0);
     sky = mix(sky, cloudColor, cloud * 0.94);
   }
-  sky += vec3(1.0, 0.95, 0.85) * 400000.0 * smoothstep(0.9995, 0.9999, sunAmount) * (1.0 - cloud);
-  gl_FragColor = vec4(sky * uExposure, 1.0);
+  sky += uSunDisc * uExposure * smoothstep(0.9995, 0.9999, sunAmount) * (1.0 - cloud);
+  gl_FragColor = vec4(sky, 1.0);
 }
 `
+
+const _color = new Color()
 
 export class Lighting {
   /** 太陽の光と影。カメラからの距離で 3 段に分け、段ごとに光源と影の地図を持つ */
@@ -165,11 +187,17 @@ export class Lighting {
   private readonly prepared = new WeakSet<Material>()
   readonly hemisphere = new HemisphereLight(new Color(0.62, 0.78, 1.0), new Color(0.2, 0.26, 0.12), 1)
   readonly sunDirection = new Vector3()
-  private readonly fog = new FogExp2(0xffffff, 0.0009)
+  private readonly atmosphere = new Atmosphere()
+  private lastSkyUpdate = -Infinity
   private readonly sunColor = new Color()
-  private readonly zenith = new Color()
-  private readonly horizon = new Color()
+  private readonly sunDisc = new Color()
   private readonly cloudLit = new Color()
+  // 霞と空で共有する値。空の表、霞の濃さ(色ごとの消散係数)、空の輝度に掛ける倍率(照度 × 露出)
+  private readonly aerialUniforms = {
+    uSkyView: { value: this.atmosphere.skyView },
+    uAerialExtinction: { value: new Vector3() },
+    uSkyScale: { value: 1 }
+  }
   // 雲の位置。風で流れた分だけずらす。空と、影を受ける材質とで共有する
   private readonly cloudUniforms = {
     uCloudOffset: { value: new Vector2() },
@@ -191,12 +219,12 @@ export class Lighting {
       depthWrite: false,
       fog: false,
       uniforms: {
-        uZenith: { value: this.zenith },
-        uHorizon: { value: this.horizon },
         uSunDir: { value: this.sunDirection },
+        uSunDisc: { value: this.sunDisc },
         uCloudLit: { value: this.cloudLit },
         uExposure: { value: 1 },
-        ...this.cloudUniforms
+        ...this.cloudUniforms,
+        ...this.aerialUniforms
       }
     })
     this.sky = new Mesh(new SphereGeometry(2500, 32, 16), this.skyMaterial)
@@ -217,38 +245,66 @@ export class Lighting {
       lightMargin: 60,
       shadowBias: -0.0002
     })
-    for (const light of this.csm.lights) {
-      light.color.copy(SUN_COLOR)
-      light.shadow.normalBias = 0.04
-    }
+    for (const light of this.csm.lights) light.shadow.normalBias = 0.04
 
+    // 霞は材質に差し込んだ計算で掛けるので、three.js の霧は使わない
     scene.add(this.hemisphere, this.sky)
-    scene.fog = this.fog
   }
 
   /**
-   * 毎フレーム呼ぶ。露出を光源に掛け、影と空をカメラに追従させる。
+   * 毎フレーム呼ぶ。大気の計算から光源と空を決め、露出を掛け、影と空をカメラに追従させる。
    */
-  update(exposure: number, cameraPosition: Vector3): void {
+  update(renderer: WebGLRenderer, exposure: number, cameraPosition: Vector3): void {
     const s = this.settings
     const el = (s.sunElevation * Math.PI) / 180
     const az = (s.sunAzimuth * Math.PI) / 180
     this.sunDirection.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el))
 
-    // 太陽が低いと、光は赤みを帯びて弱くなり、空も暗く、地平線は暖かい色になる
-    const warm = Math.min(Math.max((WARM_BELOW_DEG - s.sunElevation) / (WARM_BELOW_DEG - 3), 0), 1)
-    this.sunColor.copy(SUN_COLOR).lerp(LOW_SUN_COLOR, Math.pow(warm, 1.3))
-    const sunFactor = 1 - 0.6 * warm * warm
-    const skyFactor = 1 - 0.45 * warm
-    this.zenith.copy(ZENITH_LUMINANCE).multiplyScalar(1 - 0.4 * warm)
-    this.horizon.copy(HORIZON_LUMINANCE).lerp(LOW_HORIZON_LUMINANCE, 0.6 * warm).multiplyScalar(1 - 0.25 * warm)
-    this.cloudLit.copy(this.sunColor).multiplyScalar(10500 * sunFactor).addScalar(1500 * skyFactor)
+    // 空の表。太陽が動いたか、霞の濃さが変わったときに作り直す
+    const now = performance.now()
+    if (now - this.lastSkyUpdate >= SKY_UPDATE_INTERVAL) {
+      if (this.atmosphere.update(renderer, this.sunDirection, s.haze)) this.lastSkyUpdate = now
+    }
 
+    // 太陽の光。大気を抜ける間に、青い光ほど散らばって減る。太陽が低いほど空気の中を長く通るので、弱く赤くなる
+    const [tr, tg, tb] = sunTransmittance(s.sunElevation, s.haze)
+    const strongest = Math.max(tr, tg, tb, 1e-4)
+    this.sunColor.setRGB(tr / strongest, tg / strongest, tb / strongest)
+    const sunIlluminance = s.sunIlluminance * strongest
     for (const light of this.csm.lights) {
       light.color.copy(this.sunColor)
-      light.intensity = s.sunIlluminance * sunFactor * exposure
+      light.intensity = sunIlluminance * exposure
     }
-    this.hemisphere.intensity = s.skyIlluminance * skyFactor * exposure
+    // 太陽の円盤。実際の輝度は桁違いに高く、描画バッファに収まらないので、控えめな値にする
+    this.sunDisc.copy(this.sunColor).multiplyScalar(400000 * strongest)
+
+    // 空からの光。上を向いた面には空の全体から、下を向いた面には地面の照り返しが届く
+    const sky = this.atmosphere.skyIrradiance
+    const skyStrongest = Math.max(sky.x, sky.y, sky.z, 1e-6)
+    this.hemisphere.color.setRGB(sky.x / skyStrongest, sky.y / skyStrongest, sky.z / skyStrongest)
+    const direct = Math.sin(el) * strongest
+    this.hemisphere.groundColor
+      .setRGB(
+        sky.x + this.sunColor.r * direct,
+        sky.y + this.sunColor.g * direct,
+        sky.z + this.sunColor.b * direct
+      )
+      .multiply(GROUND_ALBEDO)
+      .multiplyScalar(1 / skyStrongest)
+    this.hemisphere.intensity = s.sunIlluminance * skyStrongest * exposure
+
+    // 雲の明るい側の輝度。太陽の光と、空からの光を受けて白く光る
+    this.cloudLit
+      .copy(this.sunColor)
+      .multiplyScalar(sunIlluminance * 0.117)
+      .add(_color.setRGB(sky.x, sky.y, sky.z).multiplyScalar(s.sunIlluminance * 0.1))
+
+    // 霞の濃さ。地表での散乱の係数に、遠近感を出すための倍率を掛ける
+    const mie = MIE_BETA * s.haze * MIE_EXTINCTION
+    this.aerialUniforms.uAerialExtinction.value
+      .set(RAYLEIGH_BETA[0] + mie, RAYLEIGH_BETA[1] + mie, RAYLEIGH_BETA[2] + mie)
+      .multiplyScalar(AERIAL_BOOST)
+    this.aerialUniforms.uSkyScale.value = s.sunIlluminance * exposure
     this.cloudUniforms.uCloudCover.value = s.cloudCover
     this.cloudUniforms.uCloudSun.value
       .set(this.sunDirection.x, this.sunDirection.z)
@@ -260,7 +316,6 @@ export class Lighting {
 
     this.skyMaterial.uniforms.uExposure.value = exposure
     this.sky.position.copy(cameraPosition)
-    this.fog.color.copy(this.horizon).multiplyScalar(exposure)
   }
 
   /** 雲を流す。seconds はシミュレーションの時間(秒)。wind は風の強さ(1 が標準) */
@@ -302,14 +357,18 @@ export class Lighting {
         material.onBeforeCompile = (shader, renderer) => {
           cascade.call(material, shader, renderer)
           own.call(material, shader, renderer)
-          // 雲の影
-          Object.assign(shader.uniforms, this.cloudUniforms)
+          // 雲の影と、霞
+          Object.assign(shader.uniforms, this.cloudUniforms, this.aerialUniforms)
           shader.vertexShader = shader.vertexShader
             .replace('#include <common>', '#include <common>\nvarying vec3 vCloudWorld;')
             .replace('#include <project_vertex>', '#include <project_vertex>\n' + CLOUD_VERTEX)
           shader.fragmentShader = shader.fragmentShader
-            .replace('#include <common>', '#include <common>\nvarying vec3 vCloudWorld;\n' + CLOUD_GLSL)
+            .replace(
+              '#include <common>',
+              '#include <common>\nvarying vec3 vCloudWorld;\n' + CLOUD_GLSL + SKY_LOOKUP_GLSL + AERIAL_HEADER
+            )
             .replace('#include <aomap_fragment>', CLOUD_FRAGMENT + '\n#include <aomap_fragment>')
+            .replace('#include <fog_fragment>', AERIAL_FRAGMENT)
         }
         // シェーダーの使い回しは onBeforeCompile の文面で決まる。つないだ関数はどれも同じ文面に
         // なるので、もともとの差し込みの文面を鍵にして、別のシェーダーとして扱わせる

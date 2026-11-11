@@ -54,6 +54,7 @@ import {
   reelSegments,
   wheelPositions
 } from './sim/vehicle'
+import { SunGizmo } from './sunGizmo'
 import { addCheck, addPanelToggle, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
 
 // 単位はすべて実寸(1 = 1 m)
@@ -466,6 +467,9 @@ if (queryCam && CAMERA_MODES.includes(queryCam)) rig.setMode(queryCam)
 // 定点の視点の、自動の旋回の段(動作確認用)
 const queryOrbit = Number(query.get('orbit'))
 if (queryOrbit) rig.stepOrbit(queryOrbit)
+// 追従視点の向き(動作確認用)。「回り込む角度,見上げ下げの角度」を度で書く。例: chase=0,-18 で地平線を見る
+const queryChase = query.get('chase')?.split(',').map(Number)
+if (queryChase && queryChase.length === 2) rig.setChaseAngles(queryChase[0], queryChase[1])
 const queryZoom = Number(query.get('zoom'))
 if (queryZoom > 0) rig.setZoom(queryZoom)
 if (query.get('ui') === '0') document.body.classList.add('minimal-ui')
@@ -681,6 +685,7 @@ syncs.push(
     set: (v) => {
       lighting.settings.sunElevation = v
       timeSettings.sunFollowsClock = false
+      sunGizmo.touch()
     },
     format: (v) => `${v.toFixed(0)}°`
   }),
@@ -693,6 +698,7 @@ syncs.push(
     set: (v) => {
       lighting.settings.sunAzimuth = v
       timeSettings.sunFollowsClock = false
+      sunGizmo.touch()
     },
     format: (v) => `${v.toFixed(0)}°`
   }),
@@ -707,6 +713,18 @@ syncs.push(
       lighting.settings.cloudCover = v
     },
     format: (v) => `${(v * 100).toFixed(0)}%`
+  }),
+  addSlider(lightFields, {
+    label: '霞',
+    title: '空気の中の霞の濃さ。大きいほど空が白っぽく、遠くが霞み、朝夕の太陽が弱く赤くなります',
+    min: 0.5,
+    max: 12,
+    step: 0.5,
+    get: () => lighting.settings.haze,
+    set: (v) => {
+      lighting.settings.haze = v
+    },
+    format: (v) => v.toFixed(1)
   })
 )
 
@@ -1061,6 +1079,14 @@ function updateViewHint(): void {
   if (viewHint.textContent !== text) viewHint.textContent = text
 }
 
+// 太陽の向きのギズモ。太陽を手で動かしている間だけ出す
+const sunGizmo = new SunGizmo(
+  document.getElementById('sun-gizmo') as unknown as SVGSVGElement,
+  byId('sun-gizmo-label')
+)
+// 動作確認用: ?gizmo=1 で、ギズモを出したままにする
+if (query.get('gizmo') === '1') sunGizmo.held = true
+
 // L を押しながら左ドラッグ: 太陽の向きを変える。左右で方位、上下で高度。
 // 空をつかんで回す向きにしてある(右へ引くと、正面の太陽は右へ、手前に落ちる影も右へ動く)。
 // 視点のドラッグより先に受け取り、視点は動かさない
@@ -1074,6 +1100,7 @@ function updateViewHint(): void {
       e.stopImmediatePropagation()
       e.preventDefault()
       sunPointer = e.pointerId
+      sunGizmo.held = true
       canvas.setPointerCapture(e.pointerId)
       canvas.style.cursor = 'grabbing'
     },
@@ -1096,6 +1123,7 @@ function updateViewHint(): void {
     if (e.pointerId !== sunPointer) return
     e.stopImmediatePropagation()
     sunPointer = null
+    sunGizmo.held = false
     canvas.style.cursor = ''
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
   }
@@ -1494,7 +1522,17 @@ function frame(now: number): void {
   zoneOverlay.tick(dt)
   pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
   grassBlades.update(rig.camera, bladeSettings.show)
-  lighting.update(exposure, rig.camera.position)
+  lighting.update(renderer, exposure, rig.camera.position)
+  // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
+  sunGizmo.update(
+    dt,
+    rig.camera,
+    rig.focusPoint,
+    // 画面の高さの半分強に収まる大きさ(画角が狭い視点では、その分だけ小さくする)
+    rig.camera.position.distanceTo(rig.focusPoint) * Math.tan((rig.camera.fov * Math.PI) / 360) * 0.55,
+    lighting.settings.sunAzimuth,
+    lighting.settings.sunElevation
+  )
 
   // ピントは機体に合わせる。視線に沿った距離で持つ
   const s = rig.settings
