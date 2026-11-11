@@ -45,9 +45,12 @@ const VERTS_PER_QUAD = 6
 
 const VERTEX_SHADER = /* glsl */ `
 attribute vec3 stamp;
+attribute vec2 feather;
 varying vec3 vStamp;
+varying vec2 vFeather;
 void main() {
   vStamp = stamp;
+  vFeather = feather;
   gl_Position = vec4(position.xy, 0.0, 1.0);
 }
 `
@@ -55,8 +58,12 @@ void main() {
 const FRAGMENT_SHADER = /* glsl */ `
 uniform float uFreshness;
 varying vec3 vStamp;
+varying vec2 vFeather;
 void main() {
-  gl_FragColor = vec4(vStamp.xy * 0.5 + 0.5, uFreshness, vStamp.z);
+  // 帯の両脇では、刈高から「刈っていない高さ」へなだらかに上げる。
+  // 芝丈は低い方だけが残る(MIN 合成)ので、縁が階段状にならず、なめらかにつながる
+  float t = smoothstep(vFeather.y, 1.0, abs(vFeather.x));
+  gl_FragColor = vec4(vStamp.xy * 0.5 + 0.5, uFreshness, mix(vStamp.z, 0.6, t));
 }
 `
 
@@ -67,6 +74,7 @@ export class MowMap {
   private readonly camera = new Camera()
   private readonly positions: Float32Array
   private readonly stamps: Float32Array
+  private readonly feathers: Float32Array
   private readonly geometry: BufferGeometry
   private readonly stampMaterial: ShaderMaterial
   private readonly fillMaterial: ShaderMaterial
@@ -94,7 +102,9 @@ export class MowMap {
     this.stamps = new Float32Array(MAX_QUADS * VERTS_PER_QUAD * 3)
     this.geometry = new BufferGeometry()
     this.geometry.setAttribute('position', new BufferAttribute(this.positions, 3))
+    this.feathers = new Float32Array(MAX_QUADS * VERTS_PER_QUAD * 2)
     this.geometry.setAttribute('stamp', new BufferAttribute(this.stamps, 3))
+    this.geometry.setAttribute('feather', new BufferAttribute(this.feathers, 2))
 
     this.stampMaterial = new ShaderMaterial({
       uniforms: { uFreshness: { value: 1 } },
@@ -134,12 +144,13 @@ export class MowMap {
   reset(uncutHeight: number): void {
     this.quadCount = 0
     const h = uncutHeight / this.options.maxHeight
-    this.writeQuad(-1, -1, 1, -1, 1, 1, -1, 1, 0, 0, h)
+    this.writeQuad(-1, -1, 1, -1, 1, 1, -1, 1, 0, 0, h, 1)
     this.draw(this.fillMaterial)
   }
 
   /**
-   * 刈刃が通った四角形を追加する。頂点はワールド座標(X, Z)で、周回順に渡す。
+   * 刈刃が通った四角形を追加する。頂点はワールド座標(X, Z)で、
+   * 前の左端、前の右端、今の右端、今の左端の順に渡す。
    * dirX, dirZ は進行方向の単位ベクトル。
    */
   addQuad(
@@ -158,18 +169,27 @@ export class MowMap {
     if (this.quadCount >= MAX_QUADS) this.flush()
     const o = this.options
     const sx = 2 / o.size
+    // 両脇を 1.5 テクセルぶん外へ広げ、そこを縁のぼかしに使う
+    const margin = (o.size / o.resolution) * 1.5
+    const prevWidth = Math.hypot(ax - bx, az - bz) || 1
+    const curWidth = Math.hypot(dx - cx, dz - cz) || 1
+    const pux = ((ax - bx) / prevWidth) * margin
+    const puz = ((az - bz) / prevWidth) * margin
+    const cux = ((dx - cx) / curWidth) * margin
+    const cuz = ((dz - cz) / curWidth) * margin
     this.writeQuad(
-      (ax - o.originX) * sx - 1,
-      (az - o.originZ) * sx - 1,
-      (bx - o.originX) * sx - 1,
-      (bz - o.originZ) * sx - 1,
-      (cx - o.originX) * sx - 1,
-      (cz - o.originZ) * sx - 1,
-      (dx - o.originX) * sx - 1,
-      (dz - o.originZ) * sx - 1,
+      (ax + pux - o.originX) * sx - 1,
+      (az + puz - o.originZ) * sx - 1,
+      (bx - pux - o.originX) * sx - 1,
+      (bz - puz - o.originZ) * sx - 1,
+      (cx - cux - o.originX) * sx - 1,
+      (cz - cuz - o.originZ) * sx - 1,
+      (dx + cux - o.originX) * sx - 1,
+      (dz + cuz - o.originZ) * sx - 1,
       dirX,
       dirZ,
-      cutHeight / o.maxHeight
+      cutHeight / o.maxHeight,
+      prevWidth / (prevWidth + margin * 2)
     )
   }
 
@@ -197,10 +217,14 @@ export class MowMap {
     dy: number,
     s0: number,
     s1: number,
-    s2: number
+    s2: number,
+    core: number
   ): void {
     const xs = [ax, bx, cx, ax, cx, dx]
     const ys = [ay, by, cy, ay, cy, dy]
+    // 幅方向の位置(左端 -1、右端 +1)。core は、ぼかさない中央部分の割合
+    const edges = [-1, 1, 1, -1, 1, -1]
+    let j = this.quadCount * VERTS_PER_QUAD * 2
     let i = this.quadCount * VERTS_PER_QUAD * 3
     for (let v = 0; v < VERTS_PER_QUAD; v++) {
       this.positions[i] = xs[v]
@@ -209,7 +233,10 @@ export class MowMap {
       this.stamps[i] = s0
       this.stamps[i + 1] = s1
       this.stamps[i + 2] = s2
+      this.feathers[j] = edges[v]
+      this.feathers[j + 1] = core
       i += 3
+      j += 2
     }
     this.quadCount++
   }
@@ -219,6 +246,7 @@ export class MowMap {
     const stamp = this.geometry.getAttribute('stamp') as BufferAttribute
     position.needsUpdate = true
     stamp.needsUpdate = true
+    ;(this.geometry.getAttribute('feather') as BufferAttribute).needsUpdate = true
     this.geometry.setDrawRange(0, this.quadCount * VERTS_PER_QUAD)
     this.mesh.material = material
 

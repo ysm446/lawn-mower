@@ -50,7 +50,7 @@ const FIELD_SIZE = 512
 const FIELD_ORIGIN = -FIELD_SIZE / 2
 const GROUND_EXTENT = 7000
 const MAX_GRASS_HEIGHT = 0.2
-const UNCUT_HEIGHT = 0.07
+const UNCUT_HEIGHT = 0.1
 const SIM_DT = 1 / 120
 const MAX_STEPS_PER_FRAME = 600
 const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64]
@@ -268,6 +268,8 @@ const queryScale = Number(query.get('timescale'))
 if (queryScale > 0) sim.timeScale = queryScale
 const queryCam = query.get('cam') as CameraMode | null
 if (queryCam && CAMERA_MODES.includes(queryCam)) rig.setMode(queryCam)
+const queryZoom = Number(query.get('zoom'))
+if (queryZoom > 0) rig.setZoom(queryZoom)
 if (query.get('ui') === '0') document.body.classList.add('minimal-ui')
 // ------------------------------------------------ UI
 

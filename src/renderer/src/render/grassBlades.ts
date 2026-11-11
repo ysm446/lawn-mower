@@ -110,12 +110,16 @@ vec2 bladeBend = bladeLean * 0.75 + vec2(cos(wildAngle), sin(wildAngle)) * wild;
 // 地形の傾きから法線を求める。地面と同じ明るさで照らすため
 float slopeX = terrainHeight(bladeRoot + vec2(0.5, 0.0)) - terrainHeight(bladeRoot - vec2(0.5, 0.0));
 float slopeZ = terrainHeight(bladeRoot + vec2(0.0, 0.5)) - terrainHeight(bladeRoot - vec2(0.0, 0.5));
-objectNormal = normalize(vec3(-slopeX, 1.0, -slopeZ));
+vec3 terrainNormal = normalize(vec3(-slopeX, 1.0, -slopeZ));
+// 葉の面の向きを 1 枚ごとに変える。向きの合った葉だけが太陽を反射して、きらめいて見える
+float faceAngle = rndA * 6.2832;
+vec3 faceNormal = vec3(-sin(faceAngle), 0.0, cos(faceAngle)) * (rndC > 0.5 ? 1.0 : -1.0);
+vec3 bendTilt = vec3(bladeBend.x, 0.0, bladeBend.y) * position.y;
+objectNormal = normalize(terrainNormal * (0.7 + 0.5 * position.y) + faceNormal * 0.55 - bendTilt * 0.5);
 `
 
 const VERTEX_POSITION = /* glsl */ `
 float bladeT = position.y;
-float faceAngle = rndA * 6.2832;
 vec2 bladeSide = vec2(cos(faceAngle), sin(faceAngle)) * position.x * uBladeWidth * step(0.001, bladeHeight);
 // 先へ行くほど大きく倒れる
 vec2 bladeOffset = bladeSide + bladeBend * bladeHeight * bladeT * bladeT;
@@ -132,11 +136,15 @@ const FRAGMENT_COLOR = /* glsl */ `
 vec4 bladeState = mowSample(vBladeRoot.xz);
 vec3 bladeColor = mowGrassColor(vBladeRoot, bladeState, cameraPosition);
 // 根元は陰になって暗く、先は光が透けて明るい
-bladeColor *= mix(0.72, 1.22, vBladeT);
+bladeColor *= mix(0.62, 1.18, vBladeT);
 diffuseColor.rgb = bladeColor;
 `
 
 const FRAGMENT_NORMAL = /* glsl */ `
+// 両面を描く材質では裏面の法線が反転され、裏から見た葉が真っ黒になる。葉は薄く光を通すので、元に戻す
+#ifdef DOUBLE_SIDED
+normal *= faceDirection;
+#endif
 vec2 bladeLean = mowSample(vBladeRoot.xz).rg * 2.0 - 1.0;
 vec3 bladeTilt = vec3(-bladeLean.x, 0.0, -bladeLean.y) * uTilt;
 normal = normalize(normal + (viewMatrix * vec4(bladeTilt, 0.0)).xyz);
@@ -201,7 +209,7 @@ export class GrassBlades {
       uBladeWidth: { value: options.bladeWidth }
     }
 
-    const material = new MeshStandardMaterial({ roughness: 0.9, metalness: 0, side: DoubleSide })
+    const material = new MeshStandardMaterial({ roughness: 0.38, metalness: 0, side: DoubleSide })
     material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms)
       shader.vertexShader = shader.vertexShader

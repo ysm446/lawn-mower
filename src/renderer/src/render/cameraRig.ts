@@ -121,6 +121,12 @@ export class CameraRig {
     this.initialized = false
   }
 
+  /** 追従視点と俯瞰の距離の倍率を決める(動作確認用) */
+  setZoom(zoom: number): void {
+    this.chaseZoom = zoom
+    this.topZoom = zoom
+  }
+
   nextMode(): void {
     const i = CAMERA_MODES.indexOf(this.mode)
     this.setMode(CAMERA_MODES[(i + 1) % CAMERA_MODES.length])

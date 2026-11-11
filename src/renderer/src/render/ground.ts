@@ -41,6 +41,7 @@ export const GRASS_GLSL = /* glsl */ `
 uniform sampler2D uMowMap;
 uniform vec2 uMowOrigin;
 uniform float uMowSize;
+uniform float uMowTexel;
 uniform float uMaxHeight;
 uniform float uUncutNorm;
 uniform float uStripe;
@@ -74,7 +75,13 @@ float mowNoise(vec2 p) {
 vec4 mowSample(vec2 xz) {
   vec2 uv = (xz - uMowOrigin) / uMowSize;
   vec4 state = vec4(0.5, 0.5, 0.0, uUncutNorm);
-  if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) state = texture2D(uMowMap, uv);
+  if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
+    // 半テクセルずらした 4 点の平均を取り、斜めの縁の階段状のがたつきをならす
+    vec2 o = vec2(uMowTexel * 0.5);
+    state = 0.25 * (
+      texture2D(uMowMap, uv + vec2(o.x, o.y)) + texture2D(uMowMap, uv + vec2(-o.x, o.y)) +
+      texture2D(uMowMap, uv + vec2(o.x, -o.y)) + texture2D(uMowMap, uv + vec2(-o.x, -o.y)));
+  }
   return state;
 }
 
@@ -93,11 +100,11 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   float nFine = mowNoise(world.xz * 31.0);
   float fineFade = 1.0 - smoothstep(15.0, 70.0, dist);
 
-  // 伸びた芝は暗く黄みがかってむらがあり、刈った芝は明るく均一
-  vec3 longColor = mix(vec3(0.060, 0.115, 0.022), vec3(0.135, 0.185, 0.040), nLarge * 0.6 + nMid * 0.4);
-  vec3 cutColor = mix(vec3(0.074, 0.185, 0.028), vec3(0.092, 0.212, 0.035), nLarge);
+  // 刈っても同じ芝なので、色みは変えない。伸びた芝は葉どうしの陰で少し暗く、むらがある
+  vec3 baseColor = mix(vec3(0.088, 0.205, 0.028), vec3(0.118, 0.240, 0.036), nLarge);
+  vec3 longShade = mix(vec3(0.50, 0.48, 0.52), vec3(0.80, 0.74, 0.76), nLarge * 0.4 + nMid * 0.6);
   float tall = smoothstep(0.02, 0.06, height);
-  vec3 color = mix(cutColor, longColor, tall);
+  vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
   color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
 
   // 縞: 倒れた向きと視線の向きの関係で明暗をつける
@@ -128,7 +135,11 @@ diffuseColor.rgb = grassColor;
 const FRAGMENT_NORMAL = /* glsl */ `
 // 倒れた芝の上面は、倒れた向きと逆側に傾く。太陽の向きによる明暗の差になる
 vec3 mowTilt = vec3(-mowLean.x, 0.0, -mowLean.y) * uTilt;
-normal = normalize(normal + (viewMatrix * vec4(mowTilt, 0.0)).xyz);
+// 葉の 1 枚 1 枚の向きのばらつきを、細かいノイズで法線に与える。太陽の反射がちらちらと散る
+float glintFade = 1.0 - smoothstep(6.0, 32.0, length(vMowWorld - cameraPosition));
+vec2 glintCell = vMowWorld.xz * 55.0;
+vec3 glint = vec3(mowNoise(glintCell) - 0.5, 0.0, mowNoise(glintCell + 31.7) - 0.5) * 0.9 * glintFade;
+normal = normalize(normal + (viewMatrix * vec4(mowTilt + glint, 0.0)).xyz);
 `
 
 /**
@@ -203,6 +214,7 @@ export function createGround(
     uMowMap: { value: mowMap.texture },
     uMowOrigin: { value: new Vector2(o.originX, o.originZ) },
     uMowSize: { value: o.size },
+    uMowTexel: { value: 1 / o.resolution },
     uMaxHeight: { value: o.maxHeight },
     uUncutNorm: { value: uncutHeight / o.maxHeight },
     uStripe: { value: 0.24 },
@@ -217,7 +229,7 @@ export function createGround(
     uBladeAmount: { value: 0 }
   }
 
-  const material = new MeshStandardMaterial({ roughness: 0.95, metalness: 0 })
+  const material = new MeshStandardMaterial({ roughness: 0.6, metalness: 0 })
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.vertexShader = shader.vertexShader
