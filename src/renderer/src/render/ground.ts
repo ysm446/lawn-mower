@@ -6,11 +6,17 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  ClampToEdgeWrapping,
+  DataTexture,
+  LinearFilter,
   Mesh,
+  RedFormat,
+  UnsignedByteType,
   MeshStandardMaterial,
   Vector2,
   type Texture
 } from 'three'
+import type { GrassField } from '../sim/grassField'
 import type { Terrain } from '../sim/terrain'
 import type { MowMap } from './mowMap'
 
@@ -42,6 +48,9 @@ uniform sampler2D uMowMap;
 uniform vec2 uMowOrigin;
 uniform float uMowSize;
 uniform float uMowTexel;
+uniform sampler2D uLengthMap;
+uniform float uLengthOrigin;
+uniform float uLengthSize;
 uniform float uMaxHeight;
 uniform float uUncutNorm;
 uniform float uStripe;
@@ -107,7 +116,7 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   // 伸びた芝でも、踏まれて寝た所は葉の面が上を向き、陰が減って明るく見える
   tall *= 1.0 - 0.5 * min(length(lean), 1.0);
   // 伸びた芝は、場所によって長さが違う(芝の葉と同じ位置に出る)。長い所ほど陰が増えて暗い
-  float lengthPatch = mowNoise(world.xz * 0.35 + 9.2) * 0.6 + mowNoise(world.xz * 0.07 + 4.4) * 0.4;
+  float lengthPatch = texture2D(uLengthMap, (world.xz - uLengthOrigin) / uLengthSize).r;
   longShade *= mix(1.14, 0.84, lengthPatch);
   vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
   color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
@@ -129,6 +138,11 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   color *= 1.0 + uStripe * mix(layPatch, 1.2, pressed) * dot(lean, toFrag.xz);
   // 刈った所にも、刈り方のむらによる濃淡を少し残す
   color *= 1.0 + (nMid - 0.5) * 0.16 * (1.0 - tall);
+
+  // 刈りカス: 刈った所に、切れた葉が点々と残る。近くでだけ見える
+  float litter = (1.0 - tall) * state.b * fineFade;
+  float fleck = step(0.9, mowHash(floor(world.xz * 42.0) + 3.7));
+  color = mix(color, color * vec3(1.5, 1.32, 1.0) + vec3(0.012, 0.014, 0.0), fleck * litter * 0.7);
 
   // 区分けの色を重ねる
   vec2 zoneUv = (world.xz - uZoneOrigin) / uZoneSize;
@@ -227,16 +241,34 @@ function createTerrainGeometry(terrain: Terrain, extent: number): BufferGeometry
 export function createGround(
   mowMap: MowMap,
   terrain: Terrain,
+  grassField: GrassField,
   zoneMap: Texture,
   extent: number,
   uncutHeight: number
 ): Ground {
   const o = mowMap.options
+  const field = grassField.options
+  const lengthMap = new DataTexture(
+    grassField.data,
+    field.resolution,
+    field.resolution,
+    RedFormat,
+    UnsignedByteType
+  )
+  lengthMap.minFilter = LinearFilter
+  lengthMap.magFilter = LinearFilter
+  lengthMap.wrapS = ClampToEdgeWrapping
+  lengthMap.wrapT = ClampToEdgeWrapping
+  lengthMap.needsUpdate = true
+
   const uniforms: GroundUniforms = {
     uMowMap: { value: mowMap.texture },
     uMowOrigin: { value: new Vector2(o.originX, o.originZ) },
     uMowSize: { value: o.size },
     uMowTexel: { value: 1 / o.resolution },
+    uLengthMap: { value: lengthMap },
+    uLengthOrigin: { value: -field.size / 2 },
+    uLengthSize: { value: field.size },
     uMaxHeight: { value: o.maxHeight },
     uUncutNorm: { value: uncutHeight / o.maxHeight },
     uStripe: { value: 0.18 },

@@ -18,6 +18,7 @@ import {
   type Vector3
 } from 'three'
 import type { Terrain } from '../sim/terrain'
+import { LENGTH_FACTOR_MAX, LENGTH_FACTOR_MIN } from '../sim/grassField'
 import { GRASS_GLSL, type GroundUniforms } from './ground'
 
 export interface GrassBladeOptions {
@@ -48,6 +49,9 @@ uniform float uHeightCell;
 uniform vec2 uPatchCell;
 uniform float uSpacing;
 uniform float uBladeWidth;
+uniform sampler2D uLengthMap;
+uniform float uLengthOrigin;
+uniform float uLengthSize;
 uniform sampler2D uMowMap;
 uniform vec2 uMowOrigin;
 uniform float uMowSize;
@@ -118,8 +122,8 @@ float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRad
 float rndD = bladeHash(bladeCell + 73.9);
 float cutVary = 0.7 + 0.6 * rndC + step(0.965, rndD) * (0.8 + 1.2 * rndA);
 // 伸びた芝は、場所によって長さが違う。数 m ごとの株のかたまりと、もっと大きな広がりで変える
-float lengthPatch = bladeNoise(bladeRoot * 0.35 + 9.2) * 0.6 + bladeNoise(bladeRoot * 0.07 + 4.4) * 0.4;
-float longVary = (0.55 + 0.9 * rndC) * mix(0.4, 1.75, lengthPatch);
+float lengthPatch = texture2D(uLengthMap, (bladeRoot - uLengthOrigin) / uLengthSize).r;
+float longVary = (0.55 + 0.9 * rndC) * mix(LENGTH_MIN, LENGTH_MAX, lengthPatch);
 bladeHeight *= mix(longVary, cutVary, bladeCut) * bladeFade;
 float wild = (1.0 - bladeCut) * 0.55 + 0.08;
 float wildAngle = rndB * 6.2832;
@@ -256,7 +260,11 @@ export class GrassBlades {
     material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms)
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\n' + VERTEX_HEADER)
+        .replace(
+          '#include <common>',
+          `#include <common>\n#define LENGTH_MIN ${LENGTH_FACTOR_MIN.toFixed(3)}\n#define LENGTH_MAX ${LENGTH_FACTOR_MAX.toFixed(3)}\n` +
+            VERTEX_HEADER
+        )
         .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\n' + VERTEX_NORMAL)
         .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + VERTEX_POSITION)
       shader.fragmentShader = shader.fragmentShader

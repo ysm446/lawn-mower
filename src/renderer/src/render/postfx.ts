@@ -127,6 +127,7 @@ uniform float uFocalLength;   // m
 uniform float uFNumber;
 uniform float uSensorWidth;   // m
 uniform float uFocusDistance; // m。画面中央の視線に沿った距離
+uniform float uFocusRange;    // m。ピントの前後で、ぼかさない距離
 uniform float uScale;         // ミニチュア倍率
 uniform float uTanTilt;
 uniform float uTanHalfFovY;
@@ -146,7 +147,9 @@ float blurRadius(float dist, vec2 uv) {
   float focus = uFocusDistance / max(1.0 + rayY * uTanTilt, 0.05);
   float s = max(focus / uScale, uFocalLength * 1.5);
   float d = max(dist / uScale, 1e-4);
-  float coc = uFocalLength * uFocalLength * abs(d - s) / (uFNumber * d * (s - uFocalLength));
+  // ピントの前後 uFocusRange の範囲は、ぼけないものとして扱う(被写体の全体をくっきり写すため)
+  float off = max(abs(dist - focus) - uFocusRange, 0.0) / uScale;
+  float coc = uFocalLength * uFocalLength * off / (uFNumber * d * (s - uFocalLength));
   return min(0.5 * coc / uSensorWidth * uResolution.x, uMaxRadius);
 }
 
@@ -211,6 +214,8 @@ export interface DofSettings {
   sensorWidth: number
   /** ピントを合わせる距離(m) */
   focusDistance: number
+  /** ピントの前後で、ぼかさない距離(m) */
+  focusRange: number
   /** ミニチュア倍率 */
   scale: number
   /** ティルト(度) */
@@ -236,6 +241,7 @@ export class DofPass extends Pass {
       uFNumber: { value: 5.6 },
       uSensorWidth: { value: 0.036 },
       uFocusDistance: { value: 10 },
+      uFocusRange: { value: 0 },
       uScale: { value: 1 },
       uTanTilt: { value: 0 },
       uTanHalfFovY: { value: 0.4 },
@@ -282,6 +288,7 @@ export class DofPass extends Pass {
     u.uFNumber.value = s.fNumber
     u.uSensorWidth.value = s.sensorWidth / 1000
     u.uFocusDistance.value = s.focusDistance
+    u.uFocusRange.value = s.focusRange
     u.uScale.value = s.scale
     u.uTanTilt.value = Math.tan((s.tiltDeg * Math.PI) / 180)
     u.uTanHalfFovY.value = Math.tan((s.fovY * Math.PI) / 360)

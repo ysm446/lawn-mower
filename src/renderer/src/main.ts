@@ -14,6 +14,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { KeyboardInput } from './input'
 import { CAMERA_MODES, CAMERA_MODE_LABELS, CameraRig, type CameraMode } from './render/cameraRig'
+import { Clippings } from './render/clippings'
 import { GrassBlades } from './render/grassBlades'
 import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
@@ -26,6 +27,7 @@ import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposur
 import { CoverageGrid } from './sim/coverage'
 import { planCoverage, type CoveragePlan } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
+import { GrassField } from './sim/grassField'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
 import {
   DEFAULT_ZONING,
@@ -58,6 +60,8 @@ const MAX_STEPS_PER_FRAME = 600
 const CUT_LEAN = 0.8
 // 車輪の跡を描き込む間隔(m)
 const TRACK_STEP = 0.12
+// 刈った量(m² × 長さの倍率)あたりの粒の数
+const CLIPPINGS_PER_VOLUME = 40
 const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64]
 // 芝刈り機の出発点
 const START_X = -21
@@ -110,13 +114,34 @@ const terrain = new Terrain({
 const zoneOverlay = new ZoneOverlay(terrain)
 scene.add(zoneOverlay.lines)
 
-const ground = createGround(mowMap, terrain, zoneOverlay.texture, GROUND_EXTENT, UNCUT_HEIGHT)
+// 刈る前の芝の長さのむら(場所ごとの倍率)
+const grassField = new GrassField({
+  seed: terrain.options.seed,
+  size: FIELD_SIZE,
+  resolution: 1024
+})
+
+const ground = createGround(
+  mowMap,
+  terrain,
+  grassField,
+  zoneOverlay.texture,
+  GROUND_EXTENT,
+  UNCUT_HEIGHT
+)
 scene.add(ground.mesh)
 
 // 近景の芝の葉。?blades=0 で描かない
 const grassBlades = new GrassBlades(terrain, ground.uniforms)
 const bladeSettings = { show: query.get('blades') !== '0' }
 scene.add(grassBlades.mesh)
+
+// 刈りカスの粒
+const clippings = new Clippings(terrain)
+scene.add(clippings.mesh)
+// このフレームで刈った芝の量(面積 × 長さの倍率)。粒の数を決めるのに使う
+let cutVolume = 0
+let clippingDebt = 0
 
 // 勾配による区分け。設定を変えたら次のフレームで計算し直す
 const zoning = {
@@ -267,6 +292,7 @@ function resetAll(): void {
   prevDeck = null
   accumulator = 0
   coverage.reset()
+  clippings.clear()
   mowMap.reset(UNCUT_HEIGHT)
 }
 
@@ -759,7 +785,12 @@ function stepSimulation(): void {
       Math.cos(state.heading) * sign * CUT_LEAN,
       sim.cutHeightMm / 1000
     )
-    coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
+    // まだ刈っていない所を通った分だけ、刈りカスが出る。長い芝ほど多い
+    const newCells = coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
+    if (newCells > 0) {
+      const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)
+      cutVolume += newCells * coverage.cellSize * coverage.cellSize * length
+    }
   }
   prevDeck = state.deckDown ? deck : null
 
@@ -848,6 +879,40 @@ let focusDistance = 0
 let autoSyncTimer = 0
 const viewDirection = new Vector3()
 const scratch = new Vector3()
+/** このフレームで刈った量に応じて、刈刃から刈りカスを飛ばす */
+function emitClippings(): void {
+  // 倍速が高いときは粒を間引く(見た目の量をおおよそ保ち、重くしない)
+  clippingDebt += (cutVolume * CLIPPINGS_PER_VOLUME) / Math.sqrt(sim.timeScale)
+  cutVolume = 0
+  const count = Math.min(Math.floor(clippingDebt), 80)
+  clippingDebt -= Math.floor(clippingDebt)
+  if (count === 0) return
+  const state = sim.state
+  const deck = deckSegment(state, params)
+  const fx = Math.sin(state.heading)
+  const fz = Math.cos(state.heading)
+  for (let i = 0; i < count; i++) {
+    const t = Math.random()
+    const x = deck.lx + (deck.rx - deck.lx) * t - fx * 0.15
+    const z = deck.lz + (deck.rz - deck.lz) * t - fz * 0.15
+    // 機体の動きを少し引き継ぎつつ、後ろ斜め上へ飛ばす
+    const back = 0.4 + Math.random() * 1.6
+    const side = (Math.random() - 0.5) * 1.8
+    const carry = state.speed * 0.35
+    spawnClipping(
+      x,
+      z,
+      fx * (carry - back) + fz * side,
+      1.6 + Math.random() * 2.6,
+      fz * (carry - back) - fx * side
+    )
+  }
+}
+
+function spawnClipping(x: number, z: number, vx: number, vy: number, vz: number): void {
+  clippings.spawn(x, terrain.heightAt(x, z) + 0.1 + Math.random() * 0.1, z, vx, vy, vz)
+}
+
 let last = performance.now()
 function frame(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1)
@@ -862,6 +927,9 @@ function frame(now: number): void {
   }
   if (steps === MAX_STEPS_PER_FRAME) accumulator = 0
   mowMap.flush()
+  emitClippings()
+  // 粒は、倍速を上げても速くなりすぎないように進める
+  clippings.update(dt * Math.min(sim.timeScale, 3))
   if (zoning.dirty) updateZoning()
   if (route.dirty && (route.show || sim.autoDrive)) updateRoute()
 
@@ -884,6 +952,8 @@ function frame(now: number): void {
     fNumber: s.fNumber,
     sensorWidth: s.sensorWidth,
     focusDistance,
+    // 機体の前後がぼけないように、ピントの前後この距離まではくっきり写す
+    focusRange: 2.2,
     scale: s.miniatureScale,
     tiltDeg: s.tiltDeg,
     fovY: rig.camera.fov,

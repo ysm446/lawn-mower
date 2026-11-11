@@ -19,14 +19,16 @@ export class CoverageGrid {
     this.cells = new Uint8Array(this.cols * this.rows)
   }
 
-  /** 線分(刈刃の左右端)が通った格子を刈り済みにする */
-  markSegment(ax: number, az: number, bx: number, bz: number): void {
+  /** 線分(刈刃の左右端)が通った格子を刈り済みにする。新しく刈り済みになった格子の数を返す */
+  markSegment(ax: number, az: number, bx: number, bz: number): number {
+    const before = this.covered
     const len = Math.hypot(bx - ax, bz - az)
     const n = Math.max(1, Math.ceil(len / (this.cellSize * 0.5)))
     for (let i = 0; i <= n; i++) {
       const t = i / n
       this.markPoint(ax + (bx - ax) * t, az + (bz - az) * t)
     }
+    return this.covered - before
   }
 
   markPoint(x: number, z: number): void {
