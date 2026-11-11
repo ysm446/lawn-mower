@@ -1145,6 +1145,7 @@ function frame(now: number): void {
   treeModels.update(now / 1000, windSettings.strength)
   // 後から読み込んだモデルの材質も、影の仕組みに対応させる
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
+  pathLine.tick(dt)
   pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
   grassBlades.update(rig.camera, bladeSettings.show)
   lighting.update(exposure, rig.camera.position)

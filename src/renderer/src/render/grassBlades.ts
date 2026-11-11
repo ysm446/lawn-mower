@@ -48,7 +48,6 @@ const MAX_LEVEL = 4
 
 const VERTEX_HEADER = /* glsl */ `
 attribute vec2 aCell;
-attribute float aWide; // 葉の幅の倍率。遠くは葉をまばらにする代わりに、1 枚を太くする
 uniform sampler2D uHeightMap;
 uniform float uHeightOrigin;
 uniform float uHeightCell;
@@ -131,6 +130,23 @@ float bladeCut = 1.0 - smoothstep(0.02, 0.06, bladeHeight);
 
 // 範囲の縁に向かって葉を低くし、境目を目立たなくする
 float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, length(bladeRoot - uBladeCenter)));
+// 遠くは葉をまばらにする。ある距離で一斉に間引くと境目が線になって見えるので、
+// 間引かれる葉を距離に応じて少しずつ低くして消し、残る葉を少しずつ太くする。
+// 葉の組は、世界に固定したマス目の番号で決める: 4 マスおきの葉は最後まで残り、2 マスおきの葉は
+// 密な範囲の 2 倍まで、それ以外は密な範囲まで
+float lodDistance = length(bladeRoot - uBladeCenter);
+float lodFull = FULL_RADIUS * uBladeScale;
+vec2 lodIn4 = mod(bladeCell, 4.0);
+vec2 lodIn2 = mod(bladeCell, 2.0);
+bool lodKeep4 = lodIn4.x < 0.5 && lodIn4.y < 0.5;
+bool lodKeep2 = lodIn2.x < 0.5 && lodIn2.y < 0.5;
+if (!lodKeep4) {
+  float lodEnd = lodKeep2 ? lodFull * 2.0 : lodFull;
+  bladeFade *= 1.0 - smoothstep(lodEnd * 0.55, lodEnd, lodDistance);
+}
+float bladeWide = 1.0
+  + 0.8 * smoothstep(lodFull * 0.55, lodFull, lodDistance)
+  + 1.2 * smoothstep(lodFull * 1.1, lodFull * 2.0, lodDistance);
 // 伸びた芝は高さも向きもばらつく。刈った芝は揃っている
 // 刈った芝も、刈高ぴったりには揃わない。刃を逃れて少し長く残る葉もまばらにある
 float rndD = bladeHash(bladeCell + 73.9);
@@ -181,7 +197,7 @@ objectNormal = normalize(mix(freeNormal, laidNormal, laid));
 
 const VERTEX_POSITION = /* glsl */ `
 float bladeT = position.y;
-vec2 bladeSide = widthDir * position.x * uBladeWidth * aWide * mix(1.0, uBladeScale, 0.8) * step(0.001, bladeHeight);
+vec2 bladeSide = widthDir * position.x * uBladeWidth * bladeWide * mix(1.0, uBladeScale, 0.8) * step(0.001, bladeHeight);
 // 根元は立ち気味で、先へ行くほど寝る
 float layHere = layAngle * (0.45 + 0.55 * bladeT);
 vec2 bladeOffset = bladeSide
@@ -286,7 +302,7 @@ export class GrassBlades {
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
-          `#include <common>\n#define LENGTH_MIN ${LENGTH_FACTOR_MIN.toFixed(3)}\n#define LENGTH_MAX ${LENGTH_FACTOR_MAX.toFixed(3)}\n` +
+          `#include <common>\n#define LENGTH_MIN ${LENGTH_FACTOR_MIN.toFixed(3)}\n#define LENGTH_MAX ${LENGTH_FACTOR_MAX.toFixed(3)}\n#define FULL_RADIUS ${FULL_RADIUS.toFixed(1)}\n` +
             VERTEX_HEADER
         )
         .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\n' + VERTEX_NORMAL)
@@ -319,21 +335,19 @@ export class GrassBlades {
     const reach = Math.ceil(radius / spacing)
     const full = FULL_RADIUS / spacing
     const cells: number[] = []
-    const wide: number[] = []
     for (let iz = -reach; iz <= reach; iz++) {
       for (let ix = -reach; ix <= reach; ix++) {
         const d2 = ix * ix + iz * iz
         if (d2 > reach * reach) continue
-        const d = Math.sqrt(d2)
+        // 境目は、範囲を動かす刻みの分だけ余裕を持たせる(消え方はシェーダーが距離で決める)
+        const d = Math.sqrt(d2) - PATCH_SNAP
         const step = d <= full ? 1 : d <= full * 2 ? 2 : 4
         // 範囲は PATCH_SNAP マスずつ動かすので、相対の番号で間引いても、同じ場所の葉が残る
         if ((ix & (step - 1)) !== 0 || (iz & (step - 1)) !== 0) continue
         cells.push(ix, iz)
-        wide.push(step === 1 ? 1 : step === 2 ? 1.8 : 3)
       }
     }
     this.geometry.setAttribute('aCell', new InstancedBufferAttribute(new Float32Array(cells), 2))
-    this.geometry.setAttribute('aWide', new InstancedBufferAttribute(new Float32Array(wide), 1))
     this.geometry.instanceCount = cells.length / 2
   }
 

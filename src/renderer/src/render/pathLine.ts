@@ -30,6 +30,9 @@ const DASH_LENGTH = 1.6
 // 塗りの濃さ(中央と、縁で足す分)
 const ARROW_FILL = 0.5
 const ARROW_EDGE = 0.2
+// 現れる時間と消える時間(秒)
+const FADE_IN_SECONDS = 0.6
+const FADE_OUT_SECONDS = 0.45
 
 const ARROW_VS = /* glsl */ `
 attribute float aProgress;
@@ -46,13 +49,14 @@ void main() {
 const ARROW_FS = /* glsl */ `
 uniform vec3 uColor;
 uniform float uDone;
+uniform float uFade;
 varying float vProgress;
 varying float vSide;
 void main() {
   // 帯の縁を少し濃くする
   float edge = smoothstep(0.45, 1.0, abs(vSide));
   float done = vProgress < uDone ? 0.14 : 1.0;
-  gl_FragColor = vec4(uColor, (${ARROW_FILL.toFixed(2)} + ${ARROW_EDGE.toFixed(2)} * edge) * done);
+  gl_FragColor = vec4(uColor, (${ARROW_FILL.toFixed(2)} + ${ARROW_EDGE.toFixed(2)} * edge) * done * uFade);
 }
 `
 
@@ -65,10 +69,12 @@ export class PathLine {
   private readonly transit = new Ribbon({ width: 2.5, opacity: 0.75 })
   private readonly cutColor: Color = overlayColor(OVERLAY_PALETTE.teal)
   private readonly transitColor: Color = overlayColor(OVERLAY_PALETTE.snow)
+  private shown = false
+  private opacity = 0
 
   constructor(private readonly terrain: Terrain) {
     this.fillMaterial = new ShaderMaterial({
-      uniforms: { uColor: { value: this.cutColor }, uDone: { value: 0 } },
+      uniforms: { uColor: { value: this.cutColor }, uDone: { value: 0 }, uFade: { value: 0 } },
       vertexShader: ARROW_VS,
       fragmentShader: ARROW_FS,
       // 三角形の向きは道筋の向きで変わるので、両面を描く(片面だと上から見えず、塗りが抜ける)
@@ -85,8 +91,24 @@ export class PathLine {
     this.lines.visible = false
   }
 
+  /** 表示するか。切り替えると、ふわっと現れ、ふわっと消える(tick で進める) */
   set visible(on: boolean) {
-    this.lines.visible = on
+    this.shown = on
+  }
+
+  /** 毎フレーム呼ぶ。現れたり消えたりする途中の濃さを進める */
+  tick(dt: number): void {
+    const target = this.shown ? 1 : 0
+    if (this.opacity !== target) {
+      const step = dt / (this.shown ? FADE_IN_SECONDS : FADE_OUT_SECONDS)
+      this.opacity = this.shown ? Math.min(1, this.opacity + step) : Math.max(0, this.opacity - step)
+    }
+    // 始まりと終わりをゆるやかにする
+    const eased = this.opacity * this.opacity * (3 - 2 * this.opacity)
+    this.fillMaterial.uniforms.uFade.value = eased
+    this.outline.fade = eased
+    this.transit.fade = eased
+    this.lines.visible = this.opacity > 0
   }
 
   /** 走り終えた割合(0〜1)。そこまでを薄くする */
@@ -97,6 +119,8 @@ export class PathLine {
   }
 
   update(path: DrivePath | null): void {
+    // 経路を作り直したときは、新しい経路があらためて現れるようにする
+    this.opacity = 0
     const positions: number[] = []
     const progress: number[] = []
     const sides: number[] = []

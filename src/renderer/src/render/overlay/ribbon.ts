@@ -63,6 +63,7 @@ const RIBBON_FS = /* glsl */ `
 uniform float uOpacity;
 uniform float uDashes; // 破線の切れ目の数(進み具合 0〜1 の間に並ぶ数)。0 で実線
 uniform float uDone;   // この進み具合までは「済んだ所」として薄く描く
+uniform float uFade;   // 全体の濃さ(0〜1)。現れるときと消えるときに変える
 varying float vProgress;
 varying float vSide;
 varying vec3 vColor;
@@ -74,7 +75,7 @@ void main() {
   float peak = max(max(vColor.r, vColor.g), vColor.b);
   vec3 color = mix(vColor, vec3(peak), 0.25 * (1.0 - smoothstep(0.0, 0.55, side)));
   float done = vProgress < uDone ? 0.14 : 1.0;
-  gl_FragColor = vec4(color, edge * uOpacity * done);
+  gl_FragColor = vec4(color, edge * uOpacity * done * uFade);
 }
 `
 
@@ -110,7 +111,8 @@ export class Ribbon {
         uWidth: { value: options.width },
         uOpacity: { value: options.opacity ?? 1 },
         uDashes: { value: 0 },
-        uDone: { value: 0 }
+        uDone: { value: 0 },
+        uFade: { value: 1 }
       },
       vertexShader: RIBBON_VS,
       fragmentShader: RIBBON_FS,
@@ -123,6 +125,11 @@ export class Ribbon {
 
   set dashes(count: number) {
     this.material.uniforms.uDashes.value = count
+  }
+
+  /** 全体の濃さ(0〜1) */
+  set fade(value: number) {
+    this.material.uniforms.uFade.value = value
   }
 
   set done(progress: number) {
