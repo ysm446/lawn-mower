@@ -103,29 +103,47 @@ float bladeCut = 1.0 - smoothstep(0.02, 0.06, bladeHeight);
 float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, length(bladeRoot - uBladeCenter)));
 // 伸びた芝は高さも向きもばらつく。刈った芝は揃っている
 bladeHeight *= mix(0.55 + 0.9 * rndC, 0.85 + 0.3 * rndC, bladeCut) * bladeFade;
-float wild = (1.0 - bladeCut) * 0.55 + 0.12;
+float wild = (1.0 - bladeCut) * 0.55 + 0.08;
 float wildAngle = rndB * 6.2832;
-vec2 bladeBend = bladeLean * 0.75 + vec2(cos(wildAngle), sin(wildAngle)) * wild;
+vec2 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
+
+// 刈った芝は、刈刃とローラーに押されて進行方向へ寝る。寝る角度(鉛直からの角度)を決める
+float leanAmount = length(bladeLean);
+vec2 leanDir = leanAmount > 0.01 ? bladeLean / leanAmount : vec2(0.0);
+float layAngle = bladeCut * min(leanAmount, 1.0) * (1.02 + 0.3 * (rndB - 0.5));
+// 寝た葉は、刈高と同じ高さに収まる分だけ長く見える
+float bladeLength = bladeHeight / max(cos(layAngle), 0.4);
+float laid = bladeCut * min(leanAmount, 1.0);
 
 // 地形の傾きから法線を求める。地面と同じ明るさで照らすため
 float slopeX = terrainHeight(bladeRoot + vec2(0.5, 0.0)) - terrainHeight(bladeRoot - vec2(0.5, 0.0));
 float slopeZ = terrainHeight(bladeRoot + vec2(0.0, 0.5)) - terrainHeight(bladeRoot - vec2(0.0, 0.5));
 vec3 terrainNormal = normalize(vec3(-slopeX, 1.0, -slopeZ));
-// 葉の面の向きを 1 枚ごとに変える。向きの合った葉だけが太陽を反射して、きらめいて見える
-float faceAngle = rndA * 6.2832;
-vec3 faceNormal = vec3(-sin(faceAngle), 0.0, cos(faceAngle)) * (rndC > 0.5 ? 1.0 : -1.0);
+// 葉の面の向きを 1 枚ごとに変える。向きの合った葉だけが太陽を反射して、きらめいて見える。
+// 寝た葉は、面が倒れた向きの上側を向く(幅は倒れた向きと直交する)
+float freeAngle = rndA * 6.2832;
+float laidAngle = atan(leanDir.y, leanDir.x) + 1.5708 + (rndA - 0.5) * 0.9;
+vec2 widthDir = normalize(mix(vec2(cos(freeAngle), sin(freeAngle)), vec2(cos(laidAngle), sin(laidAngle)), laid));
+vec3 faceNormal = vec3(-widthDir.y, 0.0, widthDir.x) * (rndC > 0.5 ? 1.0 : -1.0);
 vec3 bendTilt = vec3(bladeBend.x, 0.0, bladeBend.y) * position.y;
-objectNormal = normalize(terrainNormal * (0.7 + 0.5 * position.y) + faceNormal * 0.55 - bendTilt * 0.5);
+vec3 freeNormal = terrainNormal * (0.7 + 0.5 * position.y) + faceNormal * 0.55 - bendTilt * 0.5;
+// 寝た葉の表面は、倒れた向きと逆側へ傾いた上向きになる。縞の明暗はここから生まれる
+vec3 laidNormal = terrainNormal * (0.25 + sin(layAngle)) - vec3(leanDir.x, 0.0, leanDir.y) * cos(layAngle) * 0.8
+  + faceNormal * 0.2;
+objectNormal = normalize(mix(freeNormal, laidNormal, laid));
 `
 
 const VERTEX_POSITION = /* glsl */ `
 float bladeT = position.y;
-vec2 bladeSide = vec2(cos(faceAngle), sin(faceAngle)) * position.x * uBladeWidth * step(0.001, bladeHeight);
-// 先へ行くほど大きく倒れる
-vec2 bladeOffset = bladeSide + bladeBend * bladeHeight * bladeT * bladeT;
+vec2 bladeSide = widthDir * position.x * uBladeWidth * step(0.001, bladeHeight);
+// 根元は立ち気味で、先へ行くほど寝る
+float layHere = layAngle * (0.45 + 0.55 * bladeT);
+vec2 bladeOffset = bladeSide
+  + leanDir * bladeLength * sin(layHere) * bladeT
+  + bladeBend * bladeHeight * bladeT * bladeT;
 transformed = vec3(
   bladeRoot.x + bladeOffset.x,
-  groundY + bladeHeight * bladeT * (1.0 - 0.2 * dot(bladeBend, bladeBend) * bladeT),
+  groundY + bladeLength * cos(layHere) * bladeT * (1.0 - 0.2 * dot(bladeBend, bladeBend) * bladeT),
   bladeRoot.y + bladeOffset.y
 );
 vBladeRoot = vec3(bladeRoot.x, groundY, bladeRoot.y);

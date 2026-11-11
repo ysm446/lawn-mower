@@ -2,6 +2,8 @@
 // どちらもトーンマッピングの前、HDR の画像に対して行う。
 
 import {
+  HalfFloatType,
+  LinearFilter,
   NearestFilter,
   NoBlending,
   RGBAFormat,
@@ -112,7 +114,7 @@ export class MeterPass extends Pass {
 
 // ------------------------------------------------ 被写界深度
 
-const DOF_SAMPLES = 48
+const DOF_SAMPLES = 80
 
 const DOF_FRAGMENT = /* glsl */ `
 #include <packing>
@@ -155,10 +157,12 @@ void main() {
   float total = 1.0;
   // 黄金角のらせんで、円盤の中をまんべんなく拾う
   const float GOLDEN_ANGLE = 2.39996323;
+  // 拾う位置を画素ごとに回す。全画素で同じ並びだと、拾い残しが規則的な粒になって見える
+  float spin = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) * 6.2831853;
   for (int i = 1; i < ${DOF_SAMPLES}; i++) {
     float t = float(i) / float(${DOF_SAMPLES});
     float radius = sqrt(t) * uMaxRadius;
-    float angle = float(i) * GOLDEN_ANGLE;
+    float angle = float(i) * GOLDEN_ANGLE + spin;
     vec2 uv = vUv + vec2(cos(angle), sin(angle)) * radius / uResolution;
     vec3 sampleColor = texture2D(tDiffuse, uv).rgb;
     float sampleDist = viewDistance(uv);
@@ -168,6 +172,32 @@ void main() {
     float m = smoothstep(radius - 0.5, radius + 0.5, sampleSize);
     color += mix(color / total, sampleColor, m);
     total += 1.0;
+  }
+  // ぼけの大きさを次の段(仕上げのぼかし)に渡す
+  gl_FragColor = vec4(color / total, centerSize / uMaxRadius);
+}
+`
+
+// 仕上げ: 拾った点と点のすき間を、ぼけの大きさに応じた小さなぼかしで埋める
+const DOF_FILL_FRAGMENT = /* glsl */ `
+uniform sampler2D tDiffuse;
+uniform vec2 uResolution;
+uniform float uMaxRadius;
+varying vec2 vUv;
+void main() {
+  vec4 center = texture2D(tDiffuse, vUv);
+  float reach = center.a * uMaxRadius * 0.22;
+  vec3 color = center.rgb * 4.0;
+  float total = 4.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      if (x == 0 && y == 0) continue;
+      vec4 s = texture2D(tDiffuse, vUv + vec2(float(x), float(y)) * reach / uResolution);
+      // くっきりした所(ぼけの小さい所)の色は、ぼけた所へ混ぜない
+      float w = (x == 0 || y == 0 ? 2.0 : 1.0) * smoothstep(0.0, 0.5, s.a / max(center.a, 1e-3));
+      color += s.rgb * w;
+      total += w;
+    }
   }
   gl_FragColor = vec4(color / total, 1.0);
 }
@@ -216,8 +246,31 @@ export class DofPass extends Pass {
     depthWrite: false
   })
   private readonly quad = new FullScreenQuad(this.material)
+  private readonly fillMaterial = new ShaderMaterial({
+    vertexShader: QUAD_VERTEX,
+    fragmentShader: DOF_FILL_FRAGMENT,
+    uniforms: {
+      tDiffuse: { value: null },
+      uResolution: { value: new Vector2(1, 1) },
+      uMaxRadius: { value: 16 }
+    },
+    blending: NoBlending,
+    depthTest: false,
+    depthWrite: false
+  })
+  private readonly fillQuad = new FullScreenQuad(this.fillMaterial)
+  private readonly intermediate = new WebGLRenderTarget(1, 1, {
+    type: HalfFloatType,
+    format: RGBAFormat,
+    minFilter: LinearFilter,
+    magFilter: LinearFilter,
+    depthBuffer: false
+  })
 
   setSize(width: number, height: number): void {
+    this.intermediate.setSize(width, height)
+    this.fillMaterial.uniforms.uResolution.value.set(width, height)
+    this.fillMaterial.uniforms.uMaxRadius.value = Math.max(4, height * 0.016)
     this.material.uniforms.uResolution.value.set(width, height)
     // ぼけの上限は画面の高さに比例させる
     this.material.uniforms.uMaxRadius.value = Math.max(4, height * 0.016)
@@ -243,12 +296,18 @@ export class DofPass extends Pass {
   ): void {
     this.material.uniforms.tDiffuse.value = readBuffer.texture
     this.material.uniforms.tDepth.value = readBuffer.depthTexture
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer)
+    renderer.setRenderTarget(this.intermediate)
     this.quad.render(renderer)
+    this.fillMaterial.uniforms.tDiffuse.value = this.intermediate.texture
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer)
+    this.fillQuad.render(renderer)
   }
 
   dispose(): void {
     this.material.dispose()
     this.quad.dispose()
+    this.fillMaterial.dispose()
+    this.fillQuad.dispose()
+    this.intermediate.dispose()
   }
 }
