@@ -1,6 +1,8 @@
 // 芝刈り機のモデル。寸法は実寸(m)。原点は後輪軸の中央の接地点。+Z が前。
 // Blender で作ったモデル(tools/blender/build_mower.py が書き出す mower.glb)を読み込む。
 // 読み込みが終わるまで、または失敗したときは、箱を組み合わせた仮のモデルを表示する。
+// 車体(車輪、車軸、刈刃以外)は、ばねで支えられているように揺らす。加速と減速で前後に、旋回で外側に傾き、
+// 地面の凹凸で上下に弾む(BodySpring)。
 
 import {
   BoxGeometry,
@@ -19,6 +21,121 @@ import type { VehicleParams, VehicleState } from '../sim/vehicle'
 
 const WHEEL_RADIUS = 0.32
 
+/** 車体の揺れの固有振動数(Hz)と減衰比。減衰比が小さいほど、揺れ戻しが長く続く */
+const SPRING_HZ = 1.8
+const SPRING_DAMPING = 0.3
+/** 前後の加速度(m/s²)1 あたりに、車体が前後に傾く角度(ラジアン)。加速で前が浮き、減速で沈む */
+const PITCH_PER_ACCEL = 0.02
+/** 横向きの加速度(m/s²)1 あたりに、車体が外側へ傾く角度(ラジアン) */
+const ROLL_PER_ACCEL = 0.018
+/** 車台の上下の加速度(m/s²)1 あたりに、車体が遅れて沈む・浮く量(m)。凹凸で弾む */
+const HEAVE_PER_ACCEL = 0.012
+/** 揺れの大きさの上限(傾きはラジアン、上下は m) */
+const MAX_TILT = 0.06
+const MAX_HEAVE = 0.05
+/** 揺れを計算する刻み(秒)。これより長いコマ(倍速など)は、刻みに分けて進める */
+const SPRING_STEP = 1 / 120
+/** これより長いコマ(高い倍速)では揺らさず、傾きの目標にそのまま合わせる */
+const SPRING_MAX_FRAME = 0.25
+/** 車体を傾ける中心(後輪軸から前へ、車軸の高さより少し上)の高さ(m) */
+const BODY_PIVOT_HEIGHT = 0.55
+
+/** 1 つの向きの揺れ。ばねとダンパーで、目標の値のまわりを揺れながら落ち着く */
+class Spring {
+  value = 0
+  velocity = 0
+
+  /** dt 秒進める。target は落ち着く先、push は外から加わる加速度(ばねの伸びを直接動かす) */
+  step(target: number, push: number, dt: number): void {
+    const w = 2 * Math.PI * SPRING_HZ
+    const accel = -w * w * (this.value - target) - 2 * SPRING_DAMPING * w * this.velocity + push
+    this.velocity += accel * dt
+    this.value += this.velocity * dt
+  }
+
+  /** 揺れを止めて、target に合わせる */
+  settle(target: number): void {
+    this.value = target
+    this.velocity = 0
+  }
+}
+
+/** 車体の揺れ(前後の傾き、左右の傾き、上下)。機体の動きから毎コマ求める */
+class BodySpring {
+  readonly pitch = new Spring()
+  readonly roll = new Spring()
+  readonly heave = new Spring()
+  private started = false
+  private speed = 0
+  private heading = 0
+  private height = 0
+  private climb = 0
+  private x = 0
+  private z = 0
+
+  /**
+   * 機体の状態と車台の高さ(後輪軸の中央の地面の高さ)から、揺れを dt 秒進める。
+   * 倍速でコマが長いときは揺らさず、傾きの目標に合わせる
+   */
+  update(state: VehicleState, height: number, dt: number): void {
+    if (dt <= 0) return
+    // 最初のコマと、やり直しなどで位置が飛んだときは、そこから測り直す(飛んだ分で弾まないように)
+    const jump = Math.hypot(state.x - this.x, state.z - this.z)
+    if (!this.started || jump > Math.max(5, Math.abs(state.speed) * dt * 3)) {
+      this.started = true
+      this.x = state.x
+      this.z = state.z
+      this.speed = state.speed
+      this.heading = state.heading
+      this.height = height
+      this.climb = 0
+      this.pitch.settle(0)
+      this.roll.settle(0)
+      this.heave.settle(0)
+      return
+    }
+    this.x = state.x
+    this.z = state.z
+    const accel = (state.speed - this.speed) / dt
+    const turn = Math.atan2(Math.sin(state.heading - this.heading), Math.cos(state.heading - this.heading)) / dt
+    // 左へ曲がると(向きが増える)、車体は右(外側)へ傾く。右が沈むのは、前を軸に左が上がる回転
+    const lateral = state.speed * turn
+    const climb = (height - this.height) / dt
+    const lift = (climb - this.climb) / dt
+    this.speed = state.speed
+    this.heading = state.heading
+    this.height = height
+    this.climb = climb
+
+    // 加速すると前が浮く(前を下げる回転を正とするので、負)
+    const pitchTarget = clamp(-accel * PITCH_PER_ACCEL, MAX_TILT)
+    const rollTarget = clamp(lateral * ROLL_PER_ACCEL, MAX_TILT)
+    if (dt > SPRING_MAX_FRAME) {
+      this.pitch.settle(pitchTarget)
+      this.roll.settle(rollTarget)
+      this.heave.settle(0)
+      return
+    }
+    // 車台が持ち上げられると、車体は遅れて沈む(上下の加速度と逆向きに押される)
+    const w = 2 * Math.PI * SPRING_HZ
+    const push = clamp(-lift * HEAVE_PER_ACCEL, MAX_HEAVE * 4) * w * w
+    const steps = Math.max(1, Math.ceil(dt / SPRING_STEP))
+    const h = dt / steps
+    for (let i = 0; i < steps; i++) {
+      this.pitch.step(pitchTarget, 0, h)
+      this.roll.step(rollTarget, 0, h)
+      this.heave.step(0, push, h)
+    }
+    this.pitch.value = clamp(this.pitch.value, MAX_TILT)
+    this.roll.value = clamp(this.roll.value, MAX_TILT)
+    this.heave.value = clamp(this.heave.value, MAX_HEAVE)
+  }
+}
+
+function clamp(value: number, limit: number): number {
+  return Math.min(Math.max(value, -limit), limit)
+}
+
 export class MowerModel {
   readonly root = new Group()
   private deck: Object3D = new Group()
@@ -27,6 +144,9 @@ export class MowerModel {
   private reels: Object3D[] = []
   private readonly placeholder = new Group()
   private deckLift = 0
+  /** ばねで揺らす車体のまとまり。読み込んだモデルでだけ作る(仮のモデルは揺らさない) */
+  private body: Object3D | null = null
+  private readonly spring = new BodySpring()
   /** 片付けたか。片付けたあとに読み込みが終わっても、モデルは足さない */
   private disposed = false
   private readonly left = new Vector3()
@@ -109,6 +229,22 @@ export class MowerModel {
     })
   }
 
+  /**
+   * 車体の部品(車輪、車軸、刈刃以外)を 1 つのまとまりに移す。まとまりの原点は車体を傾ける中心
+   * (前後の車軸の中間、車軸より少し上)に置き、そこを中心に揺らす
+   */
+  private groupBody(frame: Object3D): Object3D {
+    const body = new Group()
+    body.name = 'body'
+    body.position.set(0, BODY_PIVOT_HEIGHT, this.params.wheelbase / 2)
+    const parts = frame.children.filter((child) => !/^(axle_|steer_|deck$)/.test(child.name))
+    frame.add(body)
+    frame.updateMatrixWorld(true)
+    // 見た目の位置は変えずに移す
+    for (const part of parts) body.attach(part)
+    return body
+  }
+
   /** Blender 製のモデルを読み込み、仮のモデルと入れ替える */
   private loadModel(): void {
     new GLTFLoader().load(
@@ -138,6 +274,7 @@ export class MowerModel {
         this.frontWheels = steers as Object3D[]
         this.reels = reels as Object3D[]
         this.enableShadows(model)
+        this.body = this.groupBody(find('mower') ?? model)
         this.root.remove(this.placeholder)
         this.root.add(model)
       },
@@ -177,6 +314,13 @@ export class MowerModel {
     this.basis.makeBasis(this.left, this.up, this.forward)
     this.root.quaternion.setFromRotationMatrix(this.basis)
     this.root.position.set(state.x, rear, state.z)
+
+    // 車体の揺れ。加速と減速で前後に、旋回で外側に傾き、地面の凹凸で上下に弾む
+    this.spring.update(state, rear, dt)
+    if (this.body) {
+      this.body.position.y = BODY_PIVOT_HEIGHT + this.spring.heave.value
+      this.body.rotation.set(this.spring.pitch.value, 0, this.spring.roll.value)
+    }
 
     for (const pivot of this.frontWheels) pivot.rotation.y = state.steer
 
