@@ -280,6 +280,10 @@ export class GrassBlades {
         )
         .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_COLOR)
         .replace(
+          '#include <opaque_fragment>',
+          '#include <opaque_fragment>\ngl_FragColor.rgb = mowApplyZone(gl_FragColor.rgb, vBladeRoot.xz);'
+        )
+        .replace(
           '#include <normal_fragment_begin>',
           '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL
         )

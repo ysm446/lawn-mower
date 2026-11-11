@@ -20,6 +20,7 @@ import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
 import { MowerModel } from './render/mowerModel'
+import { overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
 import { DofPass, MeterPass } from './render/postfx'
 import { ZoneOverlay } from './render/zoneOverlay'
@@ -864,6 +865,9 @@ function resize(): void {
   renderer.setSize(w, h, false)
   composer.setPixelRatio(renderer.getPixelRatio())
   composer.setSize(w, h)
+  // 重ねて描く線の太さは画素で決めるので、描画先の大きさを伝える
+  overlayPixelRatio.value = renderer.getPixelRatio()
+  overlayResolution.set(w * renderer.getPixelRatio(), h * renderer.getPixelRatio())
   rig.setAspect(w / h)
 }
 window.addEventListener('resize', resize)
@@ -962,6 +966,7 @@ function frame(now: number): void {
   mower.sync(sim.state, dt * sim.timeScale, terrain)
   rig.update(sim.state, dt, terrain)
   const exposure = rig.exposure
+  pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
   grassBlades.update(rig.focusPoint, rig.camera.position, bladeSettings.show)
   lighting.update(exposure, rig.focusPoint, rig.camera.position)
 

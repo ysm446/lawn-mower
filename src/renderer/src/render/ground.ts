@@ -163,13 +163,28 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   float fleck = step(0.9, mowHash(floor(world.xz * 42.0) + 3.7));
   color = mix(color, color * vec3(1.5, 1.32, 1.0) + vec3(0.012, 0.014, 0.0), fleck * litter * 0.7);
 
-  // 区分けの色を重ねる
-  vec2 zoneUv = (world.xz - uZoneOrigin) / uZoneSize;
-  if (uZoneOverlay > 0.0 && zoneUv.x > 0.0 && zoneUv.x < 1.0 && zoneUv.y > 0.0 && zoneUv.y < 1.0) {
-    vec4 zoneColor = texture2D(uZoneMap, zoneUv);
-    color = mix(color, zoneColor.rgb * 0.6, zoneColor.a * uZoneOverlay);
-  }
   return color;
+}
+
+// 区分けの塗り(色と濃さ)。光の当たり方によらず同じ明るさで見せたいので、
+// 照明の計算が済んだ色の上に重ねる(mowApplyZone)
+vec3 mowApplyZone(vec3 lit, vec2 xz) {
+  vec2 zoneUv = (xz - uZoneOrigin) / uZoneSize;
+  vec3 result = lit;
+  if (uZoneOverlay > 0.0 && zoneUv.x > 0.0 && zoneUv.x < 1.0 && zoneUv.y > 0.0 && zoneUv.y < 1.0) {
+    // 塗りは格子で持っているので、斜めの縁が階段状になる。0.7 m ずらした 4 点の平均でならす
+    vec2 o = vec2(0.7 / uZoneSize);
+    vec4 a = texture2D(uZoneMap, zoneUv + vec2(o.x, o.y));
+    vec4 b = texture2D(uZoneMap, zoneUv + vec2(-o.x, o.y));
+    vec4 c = texture2D(uZoneMap, zoneUv + vec2(o.x, -o.y));
+    vec4 d = texture2D(uZoneMap, zoneUv + vec2(-o.x, -o.y));
+    float alpha = (a.a + b.a + c.a + d.a) * 0.25;
+    // 色は、塗りのある点だけで平均する(塗りのない点の黒が混ざらないように)
+    vec3 tint = (a.rgb * a.a + b.rgb * b.a + c.rgb * c.a + d.rgb * d.a) / max(alpha * 4.0, 1e-4);
+    // 縁に近い所ほど少し明るくして、縁が光って見えるようにする
+    result = mix(lit, tint * (0.75 + alpha * 0.6), alpha * uZoneOverlay);
+  }
+  return result;
 }
 `
 
@@ -314,6 +329,10 @@ export function createGround(
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)
       .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_COLOR)
+      .replace(
+        '#include <opaque_fragment>',
+        '#include <opaque_fragment>\ngl_FragColor.rgb = mowApplyZone(gl_FragColor.rgb, vMowWorld.xz);'
+      )
       .replace(
         '#include <normal_fragment_begin>',
         '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL
