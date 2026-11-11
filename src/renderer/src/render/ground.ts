@@ -106,6 +106,9 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   float tall = smoothstep(0.02, 0.06, height);
   // 伸びた芝でも、踏まれて寝た所は葉の面が上を向き、陰が減って明るく見える
   tall *= 1.0 - 0.5 * min(length(lean), 1.0);
+  // 伸びた芝は、場所によって長さが違う(芝の葉と同じ位置に出る)。長い所ほど陰が増えて暗い
+  float lengthPatch = mowNoise(world.xz * 0.35 + 9.2) * 0.6 + mowNoise(world.xz * 0.07 + 4.4) * 0.4;
+  longShade *= mix(1.14, 0.84, lengthPatch);
   vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
   color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
 
@@ -113,8 +116,8 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   // 近くでは葉の 1 枚ごとにも少し変える
   float hue = mowNoise(world.xz * 0.42 + 13.1) * 0.5 + mowNoise(world.xz * 0.06 + 71.9) * 0.5 - 0.5;
   hue += (mowNoise(world.xz * 23.0 + 5.7) - 0.5) * 0.7 * fineFade;
-  vec3 warm = vec3(1.26, 1.05, 0.70);
-  vec3 cool = vec3(0.78, 0.97, 1.22);
+  vec3 warm = vec3(1.12, 1.025, 0.86);
+  vec3 cool = vec3(0.90, 0.985, 1.10);
   color *= mix(cool, warm, clamp(0.5 + hue * 1.5, 0.0, 1.0));
 
   // 縞: 倒れた向きと視線の向きの関係で明暗をつける

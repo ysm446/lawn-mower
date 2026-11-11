@@ -117,7 +117,10 @@ float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRad
 // 刈った芝も、刈高ぴったりには揃わない。刃を逃れて少し長く残る葉もまばらにある
 float rndD = bladeHash(bladeCell + 73.9);
 float cutVary = 0.7 + 0.6 * rndC + step(0.965, rndD) * (0.8 + 1.2 * rndA);
-bladeHeight *= mix(0.55 + 0.9 * rndC, cutVary, bladeCut) * bladeFade;
+// 伸びた芝は、場所によって長さが違う。数 m ごとの株のかたまりと、もっと大きな広がりで変える
+float lengthPatch = bladeNoise(bladeRoot * 0.35 + 9.2) * 0.6 + bladeNoise(bladeRoot * 0.07 + 4.4) * 0.4;
+float longVary = (0.55 + 0.9 * rndC) * mix(0.4, 1.75, lengthPatch);
+bladeHeight *= mix(longVary, cutVary, bladeCut) * bladeFade;
 float wild = (1.0 - bladeCut) * 0.55 + 0.08;
 float wildAngle = rndB * 6.2832;
 vec2 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
