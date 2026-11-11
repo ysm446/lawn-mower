@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CoverageGrid } from './coverage'
-import { planCoverage, type PlanGrid, type PlanOptions } from './coveragePlan'
+import { planCoverage, smoothLoop, type PlanGrid, type PlanOptions } from './coveragePlan'
 import { distanceToOutside } from './distance'
 import { dubinsPath } from './dubins'
 import { PathFollower } from './pathFollower'
@@ -149,5 +149,34 @@ describe('planCoverage と PathFollower', () => {
     expect(area / zoning.reachableArea).toBeLessThan(1.35)
     expect(plan.transitLength).toBeLessThan(plan.cutLength * 0.5)
     for (const v of plan.path.points) expect(Number.isFinite(v)).toBe(true)
+  })
+})
+
+describe('smoothLoop', () => {
+  it('階段状の斜めの辺が、ほぼまっすぐになる', () => {
+    // (0, 0) から (40, 40) へ 2 m ごとに段のついた斜辺を持つ、直角三角形に近い形
+    const loop: number[] = []
+    for (let i = 0; i < 20; i++) loop.push(i * 2, i * 2, i * 2 + 2, i * 2)
+    loop.push(40, 40, 0, 40)
+    const smooth = smoothLoop(loop, 1, 10)
+    // 斜辺の中ほどの点は、直線 z = x - 1 の近くに並ぶ(段の高さ 2 m の揺れが消えている)
+    let worst = 0
+    for (let i = 0; i < smooth.length; i += 2) {
+      const x = smooth[i]
+      const z = smooth[i + 1]
+      if (x > 10 && x < 30 && z < x + 3) worst = Math.max(worst, Math.abs(z - (x - 1)))
+    }
+    expect(worst).toBeLessThan(0.25)
+  })
+
+  it('点はほぼ一定の間隔で並ぶ', () => {
+    const smooth = smoothLoop([0, 0, 30, 0, 30, 20, 0, 20], 1, 10)
+    expect(smooth.length / 2).toBe(100)
+    for (let i = 0; i < smooth.length; i += 2) {
+      const j = (i + 2) % smooth.length
+      const d = Math.hypot(smooth[j] - smooth[i], smooth[j + 1] - smooth[i + 1])
+      expect(d).toBeGreaterThan(0.5)
+      expect(d).toBeLessThan(1.2)
+    }
   })
 })

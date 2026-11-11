@@ -1,6 +1,49 @@
 // 芝刈り機の運動学モデル(自転車モデル)。描画に依存しない。
 // 座標系: Y が上。heading = 0 で +Z を向き、正の回転で +X 側(進行方向の左)へ曲がる。
 // 基準点は後輪軸の中央。単位は m、秒、ラジアン。
+// 機種ごとの寸法(車輪やリールの位置と幅など)は mowers/*.json に書き、ここで読み込む。
+// 同じ JSON を Blender のモデル作成スクリプトも読むので、見た目と計算の寸法がずれない。
+
+import fairwaySpec from './mowers/fairway.json'
+
+/** 車輪 1 本。位置は後輪軸の中央から測る */
+export interface WheelSpec {
+  /** 左右の位置(m)。左が正 */
+  side: number
+  /** 前後の位置(m)。前が正 */
+  ahead: number
+  /** 幅(m) */
+  width: number
+  /** 半径(m) */
+  radius: number
+  /** 操舵で向きが変わるか */
+  steered: boolean
+}
+
+/** リール(刈刃)1 連。位置は後輪軸の中央から測る */
+export interface ReelSpec {
+  side: number
+  ahead: number
+  /** 刈る幅(m) */
+  width: number
+}
+
+/** 機種の定義(mowers/*.json の形)。角度は度、速度は km/h で書く */
+export interface MowerSpec {
+  name: string
+  /** モデルのファイル名(src/renderer/src/assets/models/ の中) */
+  model: string
+  wheelbase: number
+  maxSteerDeg: number
+  maxSpeedKmh: number
+  maxReverseSpeedKmh: number
+  accel: number
+  brake: number
+  steerRateDeg: number
+  deckOffset: number
+  wheels: WheelSpec[]
+  reels: ReelSpec[]
+}
 
 export interface VehicleParams {
   /** 前後輪の軸間距離 */
@@ -17,14 +60,14 @@ export interface VehicleParams {
   brake: number
   /** 操舵角の変化速度 */
   steerRate: number
-  /** 刈り幅 */
+  /** 刈り幅(リール全体の左端から右端まで) */
   cutWidth: number
-  /** 後輪軸から刈刃までの前方距離 */
+  /** 後輪軸から刈刃までの前方距離(経路計画で使う代表値) */
   deckOffset: number
-  /** 左右の車輪の間隔 */
+  /** 左右の車輪の間隔(最も外側の車輪どうし) */
   track: number
-  /** 車輪の幅 */
-  wheelWidth: number
+  wheels: WheelSpec[]
+  reels: ReelSpec[]
 }
 
 export interface VehicleState {
@@ -50,20 +93,29 @@ export interface DeckSegment {
   rz: number
 }
 
-/** 乗用フェアウェイモアを想定した初期値 */
-export const FAIRWAY_MOWER: VehicleParams = {
-  wheelbase: 1.5,
-  maxSteer: (35 * Math.PI) / 180,
-  maxSpeed: 12 / 3.6,
-  maxReverseSpeed: 5 / 3.6,
-  accel: 1.5,
-  brake: 3.0,
-  steerRate: (70 * Math.PI) / 180,
-  cutWidth: 3.0,
-  deckOffset: 2.3,
-  track: 1.3,
-  wheelWidth: 0.3
+/** 機種の定義から、計算で使う値を作る */
+export function mowerFromSpec(spec: MowerSpec): VehicleParams {
+  const left = Math.max(...spec.reels.map((r) => r.side + r.width / 2))
+  const right = Math.min(...spec.reels.map((r) => r.side - r.width / 2))
+  const sides = spec.wheels.map((w) => w.side)
+  return {
+    wheelbase: spec.wheelbase,
+    maxSteer: (spec.maxSteerDeg * Math.PI) / 180,
+    maxSpeed: spec.maxSpeedKmh / 3.6,
+    maxReverseSpeed: spec.maxReverseSpeedKmh / 3.6,
+    accel: spec.accel,
+    brake: spec.brake,
+    steerRate: (spec.steerRateDeg * Math.PI) / 180,
+    cutWidth: left - right,
+    deckOffset: spec.deckOffset,
+    track: Math.max(...sides) - Math.min(...sides),
+    wheels: spec.wheels,
+    reels: spec.reels
+  }
 }
+
+/** 乗用フェアウェイモア(3 連リール) */
+export const FAIRWAY_MOWER: VehicleParams = mowerFromSpec(fairwaySpec)
 
 export function createVehicleState(x = 0, z = 0, heading = 0): VehicleState {
   return { x, z, heading, speed: 0, steer: 0, deckDown: true }
@@ -110,18 +162,34 @@ export function stepVehicle(
 }
 
 /**
- * 4 輪の接地点の位置。out に (x, z) を 後左、後右、前左、前右 の順で書き込む
+ * 各車輪の接地点の位置。out に (x, z) を params.wheels の順で書き込む
  */
 export function wheelPositions(state: VehicleState, params: VehicleParams, out: Float64Array): void {
   const fx = Math.sin(state.heading)
   const fz = Math.cos(state.heading)
-  const half = params.track / 2
   // 進行方向の左は (fz, -fx)
-  for (let i = 0; i < 4; i++) {
-    const side = i % 2 === 0 ? half : -half
-    const ahead = i < 2 ? 0 : params.wheelbase
-    out[i * 2] = state.x + fx * ahead + fz * side
-    out[i * 2 + 1] = state.z + fz * ahead - fx * side
+  for (let i = 0; i < params.wheels.length; i++) {
+    const wheel = params.wheels[i]
+    out[i * 2] = state.x + fx * wheel.ahead + fz * wheel.side
+    out[i * 2 + 1] = state.z + fz * wheel.ahead - fx * wheel.side
+  }
+}
+
+/**
+ * 各リールの左右端の位置。out に (左 x, 左 z, 右 x, 右 z) を params.reels の順で書き込む
+ */
+export function reelSegments(state: VehicleState, params: VehicleParams, out: Float64Array): void {
+  const fx = Math.sin(state.heading)
+  const fz = Math.cos(state.heading)
+  for (let i = 0; i < params.reels.length; i++) {
+    const reel = params.reels[i]
+    const cx = state.x + fx * reel.ahead + fz * reel.side
+    const cz = state.z + fz * reel.ahead - fx * reel.side
+    const half = reel.width / 2
+    out[i * 4] = cx + fz * half
+    out[i * 4 + 1] = cz - fx * half
+    out[i * 4 + 2] = cx - fz * half
+    out[i * 4 + 3] = cz + fx * half
   }
 }
 

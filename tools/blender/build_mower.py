@@ -5,13 +5,16 @@
 #
 # 寸法は実寸 (m)。原点は後輪軸の中央の接地点。
 # Blender では -Y が前、+X が左、+Z が上。書き出すと +Z が前、+X が左、+Y が上になる。
+# 車輪とリールの位置や幅は、機種の定義 src/renderer/src/sim/mowers/fairway.json から読む。
+# アプリの計算(刈る範囲、車輪の跡)も同じファイルを読むので、見た目と計算がずれない。
 # 動かす部品には決まった名前をつける(src/renderer/src/render/mowerModel.ts が名前で探す)。
-#   wheel_rl, wheel_rr, wheel_fl, wheel_fr : 車輪(X 軸まわりに回す)
-#   steer_fl, steer_fr                     : 前輪の向きを変える軸
-#   deck                                   : 刈刃のまとまり(上げ下げする)
-#   reel_0, reel_1, reel_2                 : リール刃(X 軸まわりに回す)
-# 数値を変えるときは、src/renderer/src/sim/vehicle.ts の FAIRWAY_MOWER と揃える。
+# 番号は、定義ファイルの wheels と reels の並び順。
+#   wheel_0, wheel_1, ... : 車輪(X 軸まわりに回す)
+#   steer_2, steer_3, ... : 操舵する車輪の向きを変える軸(番号は車輪と同じ)
+#   deck                  : 刈刃のまとまり(上げ下げする)
+#   reel_0, reel_1, ...   : リール刃(X 軸まわりに回す)
 
+import json
 import math
 import os
 
@@ -19,28 +22,23 @@ import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
-WHEELBASE = 1.5
-TRACK = 1.3
-WHEEL_RADIUS = 0.32
-WHEEL_WIDTH = 0.3
-CUT_WIDTH = 3.0
-DECK_OFFSET = 2.3
-REEL_UNITS = 3
-REEL_GAP = 0.06
-
-OUTPUT = os.path.normpath(
-    os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..",
-        "..",
-        "src",
-        "renderer",
-        "src",
-        "assets",
-        "models",
-        "mower.glb",
-    )
+SOURCE = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "renderer", "src")
 )
+with open(os.path.join(SOURCE, "sim", "mowers", "fairway.json"), encoding="utf-8") as spec_file:
+    SPEC = json.load(spec_file)
+
+WHEELS = SPEC["wheels"]
+REELS = SPEC["reels"]
+WHEELBASE = SPEC["wheelbase"]
+DECK_OFFSET = SPEC["deckOffset"]
+TRACK = max(w["side"] for w in WHEELS) - min(w["side"] for w in WHEELS)
+WHEEL_RADIUS = WHEELS[0]["radius"]
+WHEEL_WIDTH = WHEELS[0]["width"]
+# リールの刈る幅は隣と少し重なっている。見た目のリールは、その分だけ細く作る
+REEL_OVERLAP = 0.1
+
+OUTPUT = os.path.join(SOURCE, "assets", "models", SPEC["model"])
 
 
 def at(left, forward, up):
@@ -201,22 +199,22 @@ def build():
     add_cylinder("rops_top", 0.035, 0.91, at(0, 0.34, 2.04), materials["dark"], root, "X", bevel=0.01)
 
     # ---- 車輪
-    for label, side in (("l", 1), ("r", -1)):
-        rear = add_empty(f"axle_r{label}", at(side * TRACK / 2, 0, WHEEL_RADIUS), root)
-        add_wheel(f"wheel_r{label}", rear, materials)
-        steer = add_empty(f"steer_f{label}", at(side * TRACK / 2, WHEELBASE, WHEEL_RADIUS), root)
-        add_wheel(f"wheel_f{label}", steer, materials)
+    for i, wheel in enumerate(WHEELS):
+        prefix = "steer" if wheel["steered"] else "axle"
+        pivot = add_empty(f"{prefix}_{i}", at(wheel["side"], wheel["ahead"], wheel["radius"]), root)
+        add_wheel(f"wheel_{i}", pivot, materials, wheel["radius"], wheel["width"])
     add_cylinder("axle_rear", 0.045, TRACK - WHEEL_WIDTH, at(0, 0, WHEEL_RADIUS), materials["dark"], root, "X")
     add_cylinder("axle_front", 0.04, TRACK - WHEEL_WIDTH, at(0, WHEELBASE, WHEEL_RADIUS), materials["dark"], root, "X")
 
-    # ---- 刈刃(リールを 3 連。中央は少し前、左右は少し後ろ)
+    # ---- 刈刃(リールの位置と幅は定義ファイルによる)
     deck = add_empty("deck", at(0, DECK_OFFSET, 0), root)
-    unit_width = (CUT_WIDTH - REEL_GAP * (REEL_UNITS - 1)) / REEL_UNITS
-    add_box("deck_beam", (2.2, 0.09, 0.09), at(0, -0.02, 0.5), materials["dark"], deck, 0.02)
+    beam = max(r["side"] for r in REELS) - min(r["side"] for r in REELS) + 0.16
+    add_box("deck_beam", (beam, 0.09, 0.09), at(0, -0.02, 0.5), materials["dark"], deck, 0.02)
     add_box("deck_arm", (0.14, 0.78, 0.1), at(0, -0.36, 0.5), materials["dark"], deck, 0.03)
-    for i in range(REEL_UNITS):
-        left = (i - (REEL_UNITS - 1) / 2) * (unit_width + REEL_GAP)
-        forward = 0.25 if i == 1 else -0.25
+    for i, reel_spec in enumerate(REELS):
+        unit_width = reel_spec["width"] - REEL_OVERLAP
+        left = reel_spec["side"]
+        forward = reel_spec["ahead"] - DECK_OFFSET
         unit = add_empty(f"unit_{i}", at(left, forward, 0), deck)
         add_box(f"unit_cover_{i}", (unit_width, 0.36, 0.1), at(0, -0.06, 0.3), materials["body"], unit, 0.035)
         add_box(f"unit_back_{i}", (unit_width, 0.06, 0.2), at(0, -0.24, 0.2), materials["body"], unit, 0.02)

@@ -80,8 +80,8 @@ float mowNoise(vec2 p) {
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-// 芝状態マップの値。範囲の外は刈っていない芝として扱う
-vec4 mowSample(vec2 xz) {
+// 芝状態マップを 1 か所読む。範囲の外は刈っていない芝として扱う
+vec4 mowTap(vec2 xz) {
   vec2 uv = (xz - uMowOrigin) / uMowSize;
   vec4 state = vec4(0.5, 0.5, 0.0, uUncutNorm);
   if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
@@ -92,6 +92,17 @@ vec4 mowSample(vec2 xz) {
       texture2D(uMowMap, uv + vec2(o.x, -o.y)) + texture2D(uMowMap, uv + vec2(-o.x, -o.y)));
   }
   return state;
+}
+
+// 芝の状態。読む位置を細かく揺らして、刈り跡の縁が定規で引いたような直線にならないようにする。
+// 揺らすのは芝丈(刈った範囲の縁)が主で、葉の向き(縞の境目や車輪の跡)は控えめにする。
+// 車輪の跡は細いので、同じだけ揺らすと形が崩れて見える
+vec4 mowSample(vec2 xz) {
+  vec2 wobble = (vec2(mowNoise(xz * 3.3), mowNoise(xz * 3.3 + 19.7)) - 0.5) * 0.2
+      + (vec2(mowNoise(xz * 12.0 + 3.0), mowNoise(xz * 12.0 + 40.0)) - 0.5) * 0.07;
+  vec4 edge = mowTap(xz + wobble);
+  vec4 lean = mowTap(xz + wobble * 0.25);
+  return vec4(lean.rg, edge.b, edge.a);
 }
 
 // 近景の芝の葉を描く範囲の濃さ(中心で 1、縁で 0)
@@ -138,6 +149,14 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   color *= 1.0 + uStripe * mix(layPatch, 1.2, pressed) * dot(lean, toFrag.xz);
   // 刈った所にも、刈り方のむらによる濃淡を少し残す
   color *= 1.0 + (nMid - 0.5) * 0.16 * (1.0 - tall);
+  // 進行方向に沿った細い筋(リールやローラーの当たりむら)
+  float leanLength = length(lean);
+  if (leanLength > 0.05) {
+    vec2 along = lean / leanLength;
+    vec2 across = vec2(-along.y, along.x);
+    float streak = mowNoise(vec2(dot(world.xz, across) * 6.5, dot(world.xz, along) * 0.3));
+    color *= 1.0 + (streak - 0.5) * 0.14 * (1.0 - tall) * min(leanLength, 1.0);
+  }
 
   // 刈りカス: 刈った所に、切れた葉が点々と残る。近くでだけ見える
   float litter = (1.0 - tall) * state.b * fineFade;

@@ -11,12 +11,12 @@ import {
   RGBAFormat,
   UnsignedByteType
 } from 'three'
+import { smoothLoop } from '../sim/coveragePlan'
 import type { Terrain } from '../sim/terrain'
 import {
   ZONE_NONE,
   ZONE_RIDE,
   ZONE_SLOPE,
-  simplifyLoop,
   traceRegion,
   type ZoningResult
 } from '../sim/zoning'
@@ -29,6 +29,8 @@ const COLOR_NONE = [150, 25, 15, 165]
 
 /** 輪郭線を地面から浮かせる高さ(m) */
 const LINE_LIFT = 0.15
+/** 輪郭線をならす回数。多いほどなめらかで、細かな出入りが消える */
+const OUTLINE_SMOOTHING = 6
 /** 輪郭線を地形に沿わせるために刻む長さ(m) */
 const LINE_STEP = 2
 
@@ -80,16 +82,15 @@ export class ZoneOverlay {
     for (const region of regions) {
       if (region.zone !== ZONE_RIDE && region.zone !== ZONE_NONE) continue
       for (const raw of traceRegion(labels, n, region.id)) {
-        const loop = simplifyLoop(raw, 0.75)
+        // 格子に沿った輪郭は斜めの所が階段状になるので、ならしてから描く
+        const loop = smoothLoop(
+          raw.map((v) => origin + v * cell),
+          1,
+          OUTLINE_SMOOTHING
+        )
         for (let i = 0; i < loop.length; i += 2) {
           const j = (i + 2) % loop.length
-          this.addDraped(
-            points,
-            origin + loop[i] * cell,
-            origin + loop[i + 1] * cell,
-            origin + loop[j] * cell,
-            origin + loop[j + 1] * cell
-          )
+          this.addDraped(points, loop[i], loop[i + 1], loop[j], loop[j + 1])
         }
       }
     }

@@ -18,7 +18,6 @@ import type { Terrain } from '../sim/terrain'
 import type { VehicleParams, VehicleState } from '../sim/vehicle'
 
 const WHEEL_RADIUS = 0.32
-const TRACK = 1.3 // FAIRWAY_MOWER.track と揃える
 
 export class MowerModel {
   readonly root = new Group()
@@ -40,7 +39,7 @@ export class MowerModel {
     const seatMat = new MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.9 })
 
     const wheelRadius = WHEEL_RADIUS
-    const track = TRACK
+    const track = params.track
 
     const body = new Mesh(new BoxGeometry(1.15, 0.55, 2.1), bodyMat)
     body.position.set(0, 0.72, 0.65)
@@ -116,9 +115,13 @@ export class MowerModel {
         const model = gltf.scene
         const find = (name: string): Object3D | null => model.getObjectByName(name) ?? null
         const deck = find('deck')
-        const wheels = ['wheel_rl', 'wheel_rr', 'wheel_fl', 'wheel_fr'].map(find)
-        const steers = ['steer_fl', 'steer_fr'].map(find)
-        const reels = ['reel_0', 'reel_1', 'reel_2'].map(find)
+        // 部品は、機種の定義(mowers/*.json)の並び順の番号で名前がついている
+        const spec = this.params
+        const wheels = spec.wheels.map((_, i) => find(`wheel_${i}`))
+        const steers = spec.wheels
+          .map((wheel, i) => (wheel.steered ? find(`steer_${i}`) : undefined))
+          .filter((part) => part !== undefined)
+        const reels = spec.reels.map((_, i) => find(`reel_${i}`))
         const parts = [deck, ...wheels, ...steers, ...reels]
         if (parts.some((part) => part === null)) {
           console.warn('mower.glb に必要な部品が見つからないため、仮のモデルを使います')
@@ -148,7 +151,8 @@ export class MowerModel {
     // 進行方向の左
     const lx = fz
     const lz = -fx
-    const half = TRACK / 2
+    const track = this.params.track
+    const half = track / 2
     const frontX = state.x + fx * wheelbase
     const frontZ = state.z + fz * wheelbase
     const rearLeft = terrain.heightAt(state.x + lx * half, state.z + lz * half)
@@ -160,7 +164,7 @@ export class MowerModel {
 
     this.forward.set(fx * wheelbase, front - rear, fz * wheelbase).normalize()
     this.left
-      .set(lx * TRACK, (rearLeft + frontLeft - rearRight - frontRight) / 2, lz * TRACK)
+      .set(lx * track, (rearLeft + frontLeft - rearRight - frontRight) / 2, lz * track)
       .normalize()
     this.up.crossVectors(this.forward, this.left).normalize()
     this.left.crossVectors(this.up, this.forward)

@@ -43,8 +43,8 @@ import {
   deckSegment,
   minTurnRadius,
   stepVehicle,
-  wheelPositions,
-  type DeckSegment
+  reelSegments,
+  wheelPositions
 } from './sim/vehicle'
 import { addCheck, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
 
@@ -58,6 +58,11 @@ const SIM_DT = 1 / 120
 const MAX_STEPS_PER_FRAME = 600
 // 刈った芝が寝る強さ(1 で完全に寝る)。車輪に踏まれた所は 1 にして、刈り跡の中でも筋が残るようにする
 const CUT_LEAN = 0.8
+// 刈刃の上げ下げにかかる時間(秒)と、上げきったときの高さ(m)
+const DECK_MOVE_TIME = 0.5
+const DECK_LIFT_HEIGHT = 0.1
+// 刈刃がこれより上がっている間は刈らない(0 が下げきり、1 が上げきり)
+const DECK_CUT_LIMIT = 0.8
 // 車輪の跡を描き込む間隔(m)
 const TRACK_STEP = 0.12
 // 刈った量(m² × 長さの倍率)あたりの粒の数
@@ -205,10 +210,13 @@ const sim = {
   elapsed: 0,
   distance: 0
 }
-let prevDeck: DeckSegment | null = null
+let deckLift = 0
+const unitsNow = new Float64Array(params.reels.length * 4)
+const unitsPrev = new Float64Array(params.reels.length * 4)
+let unitsStarted = false
 let accumulator = 0
-const wheelsNow = new Float64Array(8)
-const wheelsPrev = new Float64Array(8)
+const wheelsNow = new Float64Array(params.wheels.length * 2)
+const wheelsPrev = new Float64Array(params.wheels.length * 2)
 let tracksStarted = false
 
 // 自動運転の経路。区分けや設定が変わったら、必要になった時点で作り直す
@@ -289,7 +297,8 @@ function resetAll(): void {
   sim.distance = 0
   route.dirty = true
   route.follower = null
-  prevDeck = null
+  deckLift = 0
+  unitsStarted = false
   accumulator = 0
   coverage.reset()
   clippings.clear()
@@ -769,30 +778,46 @@ function stepSimulation(): void {
   sim.elapsed += SIM_DT
   sim.distance += Math.abs(state.speed) * SIM_DT
 
+  // 刈刃は一瞬では上下しない。下りきるまでの間は、高めに刈る(刈り始めと刈り終わりがなだらかになる)
+  const liftTarget = state.deckDown ? 0 : 1
+  const liftStep = SIM_DT / DECK_MOVE_TIME
+  deckLift += Math.min(Math.max(liftTarget - deckLift, -liftStep), liftStep)
+  const cutting = deckLift < DECK_CUT_LIMIT && Math.abs(state.speed) > 0.01
+
+  // リールは 1 連ずつ別々の帯として描き込む(位置と幅は機種の定義による)
+  const hx = Math.sin(state.heading)
+  const hz = Math.cos(state.heading)
+  reelSegments(state, params, unitsNow)
   const deck = deckSegment(state, params)
-  if (state.deckDown && prevDeck && Math.abs(state.speed) > 0.01) {
+  if (cutting && unitsStarted) {
     const sign = state.speed >= 0 ? 1 : -1
-    mowMap.addQuad(
-      prevDeck.lx,
-      prevDeck.lz,
-      prevDeck.rx,
-      prevDeck.rz,
-      deck.rx,
-      deck.rz,
-      deck.lx,
-      deck.lz,
-      Math.sin(state.heading) * sign * CUT_LEAN,
-      Math.cos(state.heading) * sign * CUT_LEAN,
-      sim.cutHeightMm / 1000
-    )
+    const height = sim.cutHeightMm / 1000 + deckLift * DECK_LIFT_HEIGHT
+    for (let k = 0; k < unitsNow.length; k += 4) {
+      mowMap.addQuad(
+        unitsPrev[k],
+        unitsPrev[k + 1],
+        unitsPrev[k + 2],
+        unitsPrev[k + 3],
+        unitsNow[k + 2],
+        unitsNow[k + 3],
+        unitsNow[k],
+        unitsNow[k + 1],
+        hx * sign * CUT_LEAN,
+        hz * sign * CUT_LEAN,
+        height
+      )
+    }
     // まだ刈っていない所を通った分だけ、刈りカスが出る。長い芝ほど多い
-    const newCells = coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
-    if (newCells > 0) {
-      const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)
-      cutVolume += newCells * coverage.cellSize * coverage.cellSize * length
+    if (deckLift < 0.4) {
+      const newCells = coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
+      if (newCells > 0) {
+        const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)
+        cutVolume += newCells * coverage.cellSize * coverage.cellSize * length
+      }
     }
   }
-  prevDeck = state.deckDown ? deck : null
+  unitsPrev.set(unitsNow)
+  unitsStarted = cutting
 
   // 車輪の跡: 芝丈は変えずに、踏んだ所の芝を進行方向へ寝かせる。
   // 刈刃は車輪より前にあるので、刈った直後の芝の上にも跡が重なる
@@ -809,9 +834,10 @@ function stepSimulation(): void {
     const sign = state.speed >= 0 ? 1 : -1
     const dirX = Math.sin(state.heading) * sign
     const dirZ = Math.cos(state.heading) * sign
-    const halfX = (Math.cos(state.heading) * params.wheelWidth) / 2
-    const halfZ = (-Math.sin(state.heading) * params.wheelWidth) / 2
-    for (let i = 0; i < 8; i += 2) {
+    for (let i = 0; i < wheelsNow.length; i += 2) {
+      const width = params.wheels[i / 2].width
+      const halfX = (Math.cos(state.heading) * width) / 2
+      const halfZ = (-Math.sin(state.heading) * width) / 2
       mowMap.addQuad(
         wheelsPrev[i] + halfX,
         wheelsPrev[i + 1] + halfZ,

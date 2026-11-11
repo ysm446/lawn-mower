@@ -1,0 +1,23 @@
+{
+  "name": "乗用フェアウェイモア(3 連リール)",
+  "model": "mower.glb",
+  "wheelbase": 1.5,
+  "maxSteerDeg": 35,
+  "maxSpeedKmh": 12,
+  "maxReverseSpeedKmh": 5,
+  "accel": 1.5,
+  "brake": 3.0,
+  "steerRateDeg": 70,
+  "deckOffset": 2.3,
+  "wheels": [
+    { "side": 0.65, "ahead": 0, "width": 0.3, "radius": 0.32, "steered": false },
+    { "side": -0.65, "ahead": 0, "width": 0.3, "radius": 0.32, "steered": false },
+    { "side": 0.65, "ahead": 1.5, "width": 0.3, "radius": 0.32, "steered": true },
+    { "side": -0.65, "ahead": 1.5, "width": 0.3, "radius": 0.32, "steered": true }
+  ],
+  "reels": [
+    { "side": 1.02, "ahead": 2.05, "width": 1.06 },
+    { "side": 0, "ahead": 2.55, "width": 1.06 },
+    { "side": -1.02, "ahead": 2.05, "width": 1.06 }
+  ]
+}

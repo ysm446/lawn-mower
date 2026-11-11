@@ -106,10 +106,16 @@ float rndC = bladeHash(bladeCell + 41.7);
 vec2 bladeRoot = (bladeCell + vec2(rndA, rndB)) * uSpacing;
 float groundY = terrainHeight(bladeRoot);
 
-vec2 mowUv = (bladeRoot - uMowOrigin) / uMowSize;
+// 読む位置を葉ごとに少しずらす。刈り跡の縁で、刈られた葉と残った葉が入り混じる
+vec2 mowWobble = (vec2(bladeNoise(bladeRoot * 3.3), bladeNoise(bladeRoot * 3.3 + 19.7)) - 0.5) * 0.2
+  + (vec2(rndA, rndC) - 0.5) * 0.1;
+vec2 mowUv = (bladeRoot + mowWobble - uMowOrigin) / uMowSize;
+// 葉の向き(縞の境目や車輪の跡)は、位置をあまり揺らさずに読む
+vec2 leanUv = (bladeRoot + mowWobble * 0.25 - uMowOrigin) / uMowSize;
 vec4 bladeState = vec4(0.5, 0.5, 0.0, uUncutNorm);
 if (mowUv.x > 0.0 && mowUv.x < 1.0 && mowUv.y > 0.0 && mowUv.y < 1.0) {
   bladeState = texture2D(uMowMap, mowUv);
+  bladeState.rg = texture2D(uMowMap, clamp(leanUv, 0.0, 1.0)).rg;
 }
 vec2 bladeLean = bladeState.rg * 2.0 - 1.0;
 float bladeHeight = bladeState.a * uMaxHeight;

@@ -6,7 +6,7 @@
 import { distanceToOutside } from './distance'
 import { dubinsPath } from './dubins'
 import type { DrivePath } from './pathFollower'
-import { simplifyLoop, traceRegion } from './zoning'
+import { traceRegion } from './zoning'
 
 export interface PlanGrid {
   /** 一辺の標本数 */
@@ -48,6 +48,9 @@ export interface CoveragePlan {
 
 /** これより短い列は作らない(m) */
 const MIN_SWEEP_LENGTH = 4
+/** 外周刈りの経路の点の間隔(m)と、ならす回数。回数が多いほどなめらかで、角が大きく丸まる */
+const LOOP_SPACING = 1
+const LOOP_SMOOTHING = 10
 /** これより近い相手には、旋回の曲線で直接つなぐ(m) */
 const DIRECT_LINK_DISTANCE = 20
 /** 移動のとき、境界からこれだけ内側を通る(m) */
@@ -185,33 +188,53 @@ function gridRoute(
   return ordered
 }
 
-/** 輪郭の角を丸める。各頂点の前後 radius の範囲(辺が短ければ辺の半分まで)を曲線に置き換える */
-function roundCorners(loop: number[], radius: number): number[] {
-  const out: number[] = []
-  const m = loop.length
-  for (let i = 0; i < m; i += 2) {
-    const vx = loop[i]
-    const vz = loop[i + 1]
-    const px = loop[(i - 2 + m) % m] - vx
-    const pz = loop[(i - 1 + m) % m] - vz
-    const nx = loop[(i + 2) % m] - vx
-    const nz = loop[(i + 3) % m] - vz
-    const pLength = Math.hypot(px, pz)
-    const nLength = Math.hypot(nx, nz)
-    if (pLength < 1e-6 || nLength < 1e-6) continue
-    const pCut = Math.min(radius, pLength / 2) / pLength
-    const nCut = Math.min(radius, nLength / 2) / nLength
-    const ax = vx + px * pCut
-    const az = vz + pz * pCut
-    const bx = vx + nx * nCut
-    const bz = vz + nz * nCut
-    for (let k = 0; k <= 4; k++) {
-      const t = k / 4
-      const u = 1 - t
-      out.push(u * u * ax + 2 * u * t * vx + t * t * bx, u * u * az + 2 * u * t * vz + t * t * bz)
-    }
+/**
+ * 輪郭をなめらかにする。格子に沿って取り出した輪郭は、斜めの所が階段状になっている。
+ * そのまま走ると機体が小刻みに蛇行するので、一定の間隔で点を打ち直してから、
+ * 前後の点との平均をくり返し取ってならす。角も自然に丸くなる。
+ */
+export function smoothLoop(loop: number[], spacing: number, iterations: number): number[] {
+  const count = loop.length / 2
+  let perimeter = 0
+  for (let i = 0; i < count; i++) {
+    const j = (i + 1) % count
+    perimeter += Math.hypot(loop[j * 2] - loop[i * 2], loop[j * 2 + 1] - loop[i * 2 + 1])
   }
-  return out
+  const samples = Math.max(8, Math.round(perimeter / spacing))
+  const step = perimeter / samples
+
+  // 一定の間隔で点を打ち直す
+  let points = new Float64Array(samples * 2)
+  let edge = 0
+  let edgeStart = 0
+  let edgeLength = Math.hypot(loop[2] - loop[0], loop[3] - loop[1])
+  for (let s = 0; s < samples; s++) {
+    const target = s * step
+    while (edgeStart + edgeLength < target && edge < count - 1) {
+      edgeStart += edgeLength
+      edge++
+      const j = (edge + 1) % count
+      edgeLength = Math.hypot(loop[j * 2] - loop[edge * 2], loop[j * 2 + 1] - loop[edge * 2 + 1])
+    }
+    const j = (edge + 1) % count
+    const t = edgeLength > 0 ? Math.min((target - edgeStart) / edgeLength, 1) : 0
+    points[s * 2] = loop[edge * 2] + (loop[j * 2] - loop[edge * 2]) * t
+    points[s * 2 + 1] = loop[edge * 2 + 1] + (loop[j * 2 + 1] - loop[edge * 2 + 1]) * t
+  }
+
+  let next = new Float64Array(samples * 2)
+  for (let pass = 0; pass < iterations; pass++) {
+    for (let i = 0; i < samples; i++) {
+      const p = ((i - 1 + samples) % samples) * 2
+      const q = ((i + 1) % samples) * 2
+      next[i * 2] = (points[p] + 2 * points[i * 2] + points[q]) / 4
+      next[i * 2 + 1] = (points[p + 1] + 2 * points[i * 2 + 1] + points[q + 1]) / 4
+    }
+    const swap = points
+    points = next
+    next = swap
+  }
+  return Array.from(points)
 }
 
 export function planCoverage(
@@ -396,8 +419,8 @@ export function planCoverage(
     const level = options.cutWidth / 2 + pass * spacing
     for (let i = 0; i < labels.length; i++) labels[i] = dist[i] >= level ? 1 : 0
     const loops = traceRegion(labels, n, 1)
-      .map((raw) => simplifyLoop(raw, 0.6).map((v) => origin + v * cell))
-      .map((loop) => roundCorners(loop, options.turnRadius))
+      .map((raw) => raw.map((v) => origin + v * cell))
+      .map((loop) => smoothLoop(loop, LOOP_SPACING, LOOP_SMOOTHING))
       .filter((loop) => {
         let perimeter = 0
         for (let i = 0; i < loop.length; i += 2) {
