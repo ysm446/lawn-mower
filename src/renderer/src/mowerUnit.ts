@@ -3,7 +3,7 @@
 // 芝状態マップと被覆の格子は全台で共有する(どの機体が刈っても、同じ地面に跡が残る)。
 
 import type { CoveragePlan } from './sim/coveragePlan'
-import type { CoverageGrid } from './sim/coverage'
+import { CUT_ACROSS, CUT_ALONG, type CoverageGrid } from './sim/coverage'
 import type { PathFollower } from './sim/pathFollower'
 import type { Terrain } from './sim/terrain'
 import {
@@ -51,6 +51,13 @@ export interface StepContext {
   /** 芝丈が「刈っていない」とみなされる上限(車輪の跡は芝丈を変えないので、これを渡す) */
   maxGrassHeight: number
   dt: number
+  /** 往復刈りの列の向き(ラジアン)。刈った向きが、これに沿うか直交するかを被覆の格子に記録する */
+  sweepAngle: number
+  /**
+   * 交差して刈るか(チェッカー刈り)。true なら、直交する向きで刈った所を刈るとき、
+   * 芝の倒れる向きを上書きせず、前の向きと混ぜる(市松の模様になる)
+   */
+  crossCut: boolean
   /** まだ刈っていない所を刈ったとき。newCells は新しく刈った被覆の格子の数 */
   onCut: (unit: MowerUnit, newCells: number, deck: { lx: number; lz: number; rx: number; rz: number }) => void
 }
@@ -151,6 +158,12 @@ export class MowerUnit {
     const unitsPrev = this.unitsPrev
     reelSegments(state, params, unitsNow)
     const deck = deckSegment(state, params)
+    // 刈る向きが列の向きに沿うか、直交するか。チェッカー刈りでは、直交する向きで刈った所を刈るとき、向きを混ぜる
+    const along = Math.abs(Math.cos(state.heading - ctx.sweepAngle)) >= Math.SQRT1_2
+    const bit = along ? CUT_ALONG : CUT_ACROSS
+    const blend =
+      ctx.crossCut &&
+      (ctx.coverage.bitsAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2) & (along ? CUT_ACROSS : CUT_ALONG)) !== 0
     if (cutting && this.unitsStarted) {
       const sign = state.speed >= 0 ? 1 : -1
       const height = ctx.cutHeight + this.deckLift * DECK_LIFT_HEIGHT
@@ -166,12 +179,14 @@ export class MowerUnit {
           unitsNow[k + 1],
           hx * sign * CUT_LEAN,
           hz * sign * CUT_LEAN,
-          height
+          height,
+          undefined,
+          blend
         )
       }
       // まだ刈っていない所を通った分だけ、刈りカスが出る
       if (this.deckLift < 0.4) {
-        const newCells = ctx.coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
+        const newCells = ctx.coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz, bit)
         if (newCells > 0) ctx.onCut(this, newCells, deck)
       }
     }

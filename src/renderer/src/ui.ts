@@ -1,6 +1,8 @@
 // UI の部品。見た目は style.css、配置は index.html にあり、ここは値のやり取りを受け持つ。
 // 各部品は「画面の値を現在の設定に合わせ直す関数」を返す。キー操作などで設定が変わったら呼ぶ。
 
+import { enhanceSelect } from './customSelect'
+
 export type Sync = () => void
 
 export function byId<T extends HTMLElement>(id: string): T {
@@ -272,6 +274,71 @@ export function addChoice<T>(
   const sync = (): void => {
     syncButtons()
     reset.disabled = get() === defaultValue
+  }
+  sync()
+  return sync
+}
+
+/**
+ * プルダウンから 1 つを選ぶ行(ラベル、選択の欄、既定に戻すボタン)。
+ * 選択の欄は weather-globe と同じ見た目の一覧を出す(customSelect.ts)。既定値は作った時点の値
+ */
+export function addSelect<T extends string>(
+  parent: HTMLElement,
+  label: string,
+  title: string,
+  options: SwitchOption<T>[],
+  get: () => T,
+  set: (value: T) => void,
+  /** 右の列のパネルで、値を保存して次の起動で戻すか(既定は保存する)。関数なら、戻すときの条件 */
+  persist?: Persist
+): Sync {
+  const id = `field-${fieldSerial++}`
+  const name = document.createElement('label')
+  name.htmlFor = id
+  name.textContent = label
+  name.title = title
+  const cell = document.createElement('div')
+  cell.className = 'select-cell'
+  cell.title = title
+  const select = document.createElement('select')
+  select.id = id
+  for (const option of options) {
+    const item = document.createElement('option')
+    item.value = option.value
+    item.textContent = option.label
+    select.append(item)
+  }
+  cell.append(select)
+  const initial = get()
+  const reset = resetButton(label, () => {
+    set(initial)
+    sync()
+    panelValueChanged()
+  })
+  parent.append(name, cell, reset)
+  enhanceSelect(select)
+  const valid = (value: unknown): value is T => options.some((option) => option.value === value)
+  registerPanelValue(
+    parent,
+    label,
+    get,
+    (v) => {
+      if (valid(v)) set(v)
+    },
+    persist
+  )
+  select.addEventListener('change', () => {
+    if (!valid(select.value)) return
+    set(select.value)
+    reset.disabled = select.value === initial
+    // Space などのキー操作が選択の欄に取られないようにする(一覧を閉じるとフォーカスが戻るので、その後で外す)
+    window.setTimeout(() => (cell.querySelector('.app-select') as HTMLElement | null)?.blur())
+    panelValueChanged()
+  })
+  const sync = (): void => {
+    select.value = get()
+    reset.disabled = select.value === initial
   }
   sync()
   return sync

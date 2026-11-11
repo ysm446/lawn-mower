@@ -1,8 +1,10 @@
 // 刈る経路の計画。刈る範囲(格子の mask)を、往復刈りと外周刈りで塗りつぶす経路を作る。
 // 流れ: 境界からの距離 → 内側を平行な直線で区切る(往復刈り) → 近い順につなぐ
+//       (チェッカー刈りでは、往復刈りを 90° 回した向きでもう一度行う)
 //       → 直線どうしは旋回の曲線でつなぐ → 最後に境界沿いを数周する(外周刈り)
 // 経路は後輪軸の中央が通る位置で表す。刈刃は deckOffset だけ前にあるので、その分ずらす。
 
+import { CUT_ACROSS, CUT_ALONG, CUT_ANY } from './coverage'
 import { distanceToOutside } from './distance'
 import { dubinsPath } from './dubins'
 import type { DrivePath } from './pathFollower'
@@ -24,13 +26,21 @@ export interface PlanGrid {
   transit?: Uint8Array
 }
 
+/**
+ * 刈り方。stripes は往復刈り(縞)、checker は往復刈りを 90° 回した向きでもう一度重ねる(市松の模様)。
+ * どちらも最後に外周刈りをする
+ */
+export type MowPattern = 'stripes' | 'checker'
+
 export interface PlanOptions {
   /** 刈り幅(m) */
   cutWidth: number
   /** 隣の列と重ねる幅(m) */
   overlap: number
-  /** 往復刈りの向き(度)。0 で Z 方向 */
+  /** 往復刈りの向き(度)。0 で Z 方向。チェッカー刈りでは 1 回目の向き */
   angleDeg: number
+  /** 刈り方。省くと往復刈り */
+  pattern?: MowPattern
   /** 外周刈りの周回数。旋回の場所を確保する役目もある */
   headlandPasses: number
   /** 旋回の半径(m) */
@@ -44,8 +54,12 @@ export interface PlanOptions {
    * (index は列に直交する向きの位置の順。0 が normal の負の側)。外周刈りの周回は、count 台で順番に割り振る
    */
   share?: { index: number; count: number }
-  /** 刈り終えた所なら true。刈り終えた列と外周の周は飛ばす(途中から計画し直しても、刈った所を刈り直さない) */
-  isCut?: (x: number, z: number) => boolean
+  /**
+   * 刈り終えた所なら true。刈り終えた列と外周の周は飛ばす(途中から計画し直しても、刈った所を刈り直さない)。
+   * bits は、どの向きで刈ったかの印(coverage.ts の CUT_ALONG、CUT_ACROSS)。チェッカー刈りの 2 回目は、
+   * 1 回目に刈った所でも、直交する向きで刈っていなければ刈り終えていないとみなす
+   */
+  isCut?: (x: number, z: number, bits: number) => boolean
 }
 
 /** 列や周のうち、この割合以上が刈り終えていれば、刈り終えたものとして飛ばす */
@@ -358,125 +372,135 @@ export function planCoverage(
   // 列の端は、外周刈りの帯に刈り幅の半分だけ食い込ませる。
   // 境界に斜めに当たる列では、帯の片側の角が届かずに三角形の刈り残しができるため
   const sweepLimit = Math.max(headland - options.cutWidth / 2, options.cutWidth / 2)
-  const angle = (options.angleDeg * Math.PI) / 180
-  const dirX = Math.sin(angle)
-  const dirZ = Math.cos(angle)
-  const normalX = Math.cos(angle)
-  const normalZ = -Math.sin(angle)
+  const isCut = options.isCut
+  const share = options.share && options.share.count > 1 ? options.share : null
+  const lead = options.deckOffset
+  let sweepCount = 0
+  // チェッカー刈りでは、1 回目の向きと、90° 回した向きの 2 回。刈り終えたかは、それぞれの向きの印で見る
+  const layers =
+    options.pattern === 'checker'
+      ? [
+          { angleDeg: options.angleDeg, bits: CUT_ALONG },
+          { angleDeg: options.angleDeg + 90, bits: CUT_ACROSS }
+        ]
+      : [{ angleDeg: options.angleDeg, bits: CUT_ANY }]
+  for (const layer of layers) {
+    const angle = (layer.angleDeg * Math.PI) / 180
+    const dirX = Math.sin(angle)
+    const dirZ = Math.cos(angle)
+    const normalX = Math.cos(angle)
+    const normalZ = -Math.sin(angle)
 
-  // 刈る範囲が、列に直交する向きと列の向きにどこまで広がっているか
-  let cMin = Infinity
-  let cMax = -Infinity
-  let tMin = Infinity
-  let tMax = -Infinity
-  for (let iz = 0; iz < n; iz++) {
-    for (let ix = 0; ix < n; ix++) {
-      if (dist[iz * n + ix] < sweepLimit) continue
-      const x = origin + ix * cell
-      const z = origin + iz * cell
-      const c = x * normalX + z * normalZ
-      const t = x * dirX + z * dirZ
-      if (c < cMin) cMin = c
-      if (c > cMax) cMax = c
-      if (t < tMin) tMin = t
-      if (t > tMax) tMax = t
+    // 刈る範囲が、列に直交する向きと列の向きにどこまで広がっているか
+    let cMin = Infinity
+    let cMax = -Infinity
+    let tMin = Infinity
+    let tMax = -Infinity
+    for (let iz = 0; iz < n; iz++) {
+      for (let ix = 0; ix < n; ix++) {
+        if (dist[iz * n + ix] < sweepLimit) continue
+        const x = origin + ix * cell
+        const z = origin + iz * cell
+        const c = x * normalX + z * normalZ
+        const t = x * dirX + z * dirZ
+        if (c < cMin) cMin = c
+        if (c > cMax) cMax = c
+        if (t < tMin) tMin = t
+        if (t > tMax) tMax = t
+      }
     }
-  }
 
-  const sweeps: Sweep[] = []
-  if (cMin <= cMax) {
-    const step = cell * 0.5
-    const lines = Math.max(1, Math.round((cMax - cMin) / spacing) + 1)
-    // 範囲の中央に列が揃うように、端の余りを両側に振り分ける
-    const first = (cMin + cMax) / 2 - ((lines - 1) * spacing) / 2
-    for (let k = 0; k < lines; k++) {
-      const c = first + k * spacing
-      let runStart = NaN
-      for (let t = tMin - step; t <= tMax + step * 2; t += step) {
-        const inside = distAt(c * normalX + t * dirX, c * normalZ + t * dirZ) >= sweepLimit
-        if (inside && Number.isNaN(runStart)) runStart = t
-        if (!inside && !Number.isNaN(runStart)) {
-          const runEnd = t - step
-          if (runEnd - runStart >= MIN_SWEEP_LENGTH) {
-            sweeps.push({
-              ax: c * normalX + runStart * dirX,
-              az: c * normalZ + runStart * dirZ,
-              bx: c * normalX + runEnd * dirX,
-              bz: c * normalZ + runEnd * dirZ,
-              done: false,
-              line: k
-            })
+    const sweeps: Sweep[] = []
+    if (cMin <= cMax) {
+      const step = cell * 0.5
+      const lines = Math.max(1, Math.round((cMax - cMin) / spacing) + 1)
+      // 範囲の中央に列が揃うように、端の余りを両側に振り分ける
+      const first = (cMin + cMax) / 2 - ((lines - 1) * spacing) / 2
+      for (let k = 0; k < lines; k++) {
+        const c = first + k * spacing
+        let runStart = NaN
+        for (let t = tMin - step; t <= tMax + step * 2; t += step) {
+          const inside = distAt(c * normalX + t * dirX, c * normalZ + t * dirZ) >= sweepLimit
+          if (inside && Number.isNaN(runStart)) runStart = t
+          if (!inside && !Number.isNaN(runStart)) {
+            const runEnd = t - step
+            if (runEnd - runStart >= MIN_SWEEP_LENGTH) {
+              sweeps.push({
+                ax: c * normalX + runStart * dirX,
+                az: c * normalZ + runStart * dirZ,
+                bx: c * normalX + runEnd * dirX,
+                bz: c * normalZ + runEnd * dirZ,
+                done: false,
+                line: k
+              })
+            }
+            runStart = NaN
           }
-          runStart = NaN
         }
       }
     }
-  }
 
-  // 刈り終えた列は飛ばす(列の上の点を 1 m おきに調べる)
-  const isCut = options.isCut
-  if (isCut) {
-    for (const sweep of sweeps) {
-      const length = Math.hypot(sweep.bx - sweep.ax, sweep.bz - sweep.az)
-      const count = Math.max(2, Math.ceil(length))
-      const points: number[] = []
-      for (let s = 0; s <= count; s++) {
-        const t = s / count
-        points.push(sweep.ax + (sweep.bx - sweep.ax) * t, sweep.az + (sweep.bz - sweep.az) * t)
-      }
-      if (cutRatio(points, isCut) >= CUT_SKIP_RATIO) sweep.done = true
-    }
-  }
-  // 分担するときは、残っている列を、隣り合うまとまりで count 個に分け、自分のまとまりだけを残す
-  const share = options.share && options.share.count > 1 ? options.share : null
-  if (share) {
-    const lines = [...new Set(sweeps.filter((s) => !s.done).map((s) => s.line))].sort((a, b) => a - b)
-    const mine = new Set(
-      lines.filter((_, i) => Math.min(Math.floor((i * share.count) / lines.length), share.count - 1) === share.index)
-    )
-    for (const sweep of sweeps) if (!mine.has(sweep.line)) sweep.done = true
-  }
-
-  // 今いる所から近い端を持つ列を、順に選んで刈る
-  const lead = options.deckOffset
-  let sweepCount = 0
-  for (let remaining = sweeps.filter((s) => !s.done).length; remaining > 0; remaining--) {
-    let best: Sweep | null = null
-    let bestReverse = false
-    let bestDist = Infinity
-    // 刈刃のある位置から測る
-    const fromX = builder.x + Math.sin(builder.heading) * lead
-    const fromZ = builder.z + Math.cos(builder.heading) * lead
-    for (const sweep of sweeps) {
-      if (sweep.done) continue
-      const da = Math.hypot(sweep.ax - fromX, sweep.az - fromZ)
-      const db = Math.hypot(sweep.bx - fromX, sweep.bz - fromZ)
-      if (da < bestDist) {
-        bestDist = da
-        best = sweep
-        bestReverse = false
-      }
-      if (db < bestDist) {
-        bestDist = db
-        best = sweep
-        bestReverse = true
+    // 刈り終えた列は飛ばす(列の上の点を 1 m おきに調べる)
+    if (isCut) {
+      for (const sweep of sweeps) {
+        const length = Math.hypot(sweep.bx - sweep.ax, sweep.bz - sweep.az)
+        const count = Math.max(2, Math.ceil(length))
+        const points: number[] = []
+        for (let s = 0; s <= count; s++) {
+          const t = s / count
+          points.push(sweep.ax + (sweep.bx - sweep.ax) * t, sweep.az + (sweep.bz - sweep.az) * t)
+        }
+        if (cutRatio(points, (x, z) => isCut(x, z, layer.bits)) >= CUT_SKIP_RATIO) sweep.done = true
       }
     }
-    const sweep = best as Sweep
-    sweep.done = true
-    sweepCount++
-    const sx = bestReverse ? sweep.bx : sweep.ax
-    const sz = bestReverse ? sweep.bz : sweep.az
-    const ex = bestReverse ? sweep.ax : sweep.bx
-    const ez = bestReverse ? sweep.az : sweep.bz
-    const length = Math.hypot(ex - sx, ez - sz)
-    const ux = (ex - sx) / length
-    const uz = (ez - sz) / length
-    const heading = Math.atan2(ux, uz)
-    // 後輪軸は刈刃より lead だけ後ろを通る。その手前に助走をつける
-    linkTo(sx - ux * (lead + options.runIn), sz - uz * (lead + options.runIn), heading)
-    builder.add(sx - ux * lead, sz - uz * lead, false)
-    builder.add(ex - ux * lead, ez - uz * lead, true)
+    // 分担するときは、残っている列を、隣り合うまとまりで count 個に分け、自分のまとまりだけを残す
+    if (share) {
+      const lines = [...new Set(sweeps.filter((s) => !s.done).map((s) => s.line))].sort((a, b) => a - b)
+      const mine = new Set(
+        lines.filter((_, i) => Math.min(Math.floor((i * share.count) / lines.length), share.count - 1) === share.index)
+      )
+      for (const sweep of sweeps) if (!mine.has(sweep.line)) sweep.done = true
+    }
+
+    // 今いる所から近い端を持つ列を、順に選んで刈る
+    for (let remaining = sweeps.filter((s) => !s.done).length; remaining > 0; remaining--) {
+      let best: Sweep | null = null
+      let bestReverse = false
+      let bestDist = Infinity
+      // 刈刃のある位置から測る
+      const fromX = builder.x + Math.sin(builder.heading) * lead
+      const fromZ = builder.z + Math.cos(builder.heading) * lead
+      for (const sweep of sweeps) {
+        if (sweep.done) continue
+        const da = Math.hypot(sweep.ax - fromX, sweep.az - fromZ)
+        const db = Math.hypot(sweep.bx - fromX, sweep.bz - fromZ)
+        if (da < bestDist) {
+          bestDist = da
+          best = sweep
+          bestReverse = false
+        }
+        if (db < bestDist) {
+          bestDist = db
+          best = sweep
+          bestReverse = true
+        }
+      }
+      const sweep = best as Sweep
+      sweep.done = true
+      sweepCount++
+      const sx = bestReverse ? sweep.bx : sweep.ax
+      const sz = bestReverse ? sweep.bz : sweep.az
+      const ex = bestReverse ? sweep.ax : sweep.bx
+      const ez = bestReverse ? sweep.az : sweep.bz
+      const length = Math.hypot(ex - sx, ez - sz)
+      const ux = (ex - sx) / length
+      const uz = (ez - sz) / length
+      const heading = Math.atan2(ux, uz)
+      // 後輪軸は刈刃より lead だけ後ろを通る。その手前に助走をつける
+      linkTo(sx - ux * (lead + options.runIn), sz - uz * (lead + options.runIn), heading)
+      builder.add(sx - ux * lead, sz - uz * lead, false)
+      builder.add(ex - ux * lead, ez - uz * lead, true)
+    }
   }
 
   // ---------------------------------------------- 外周刈り(内側の周から外へ)
@@ -498,7 +522,7 @@ export function planCoverage(
         return perimeter >= 30
       })
       // 刈り終えた周は飛ばす
-      .filter((loop) => !isCut || cutRatio(loop, isCut) < CUT_SKIP_RATIO)
+      .filter((loop) => !isCut || cutRatio(loop, (x, z) => isCut(x, z, CUT_ANY)) < CUT_SKIP_RATIO)
 
     const pending = new Set(loops)
     while (pending.size > 0) {

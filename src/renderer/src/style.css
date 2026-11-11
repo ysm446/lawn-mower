@@ -7,6 +7,8 @@
   /* すりガラスのパネル。透明にするだけでは明るい芝の上で文字が読めないので、後ろの明るさも落とす */
   --panel: rgba(190, 190, 190, 0.04);
   --panel-strong: rgba(32, 32, 32, 0.75);
+  /* 選択の一覧のように、後ろを透かさない面 */
+  --panel-solid: #181818;
   --glass: blur(8px) brightness(0.35) saturate(1.4);
   --panel-glow: inset 0 0 16px rgba(208, 208, 208, 0.04);
   --field: #121212;
@@ -542,6 +544,88 @@ button:active:not(:disabled) {
 .reset-button:disabled {
   opacity: 0.3;
   cursor: default;
+}
+
+/* 選択の欄(weather-globe と同じ見た目)。元の select は値の持ち主として残して隠し、隣のボタンと一覧を出す (customSelect.ts) */
+.select-cell {
+  display: flex;
+  min-width: 0;
+}
+
+select.native-select {
+  display: none;
+}
+
+.app-select {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 3px 8px;
+  text-align: left;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.app-select:hover:not(:disabled) {
+  background: rgba(178, 178, 178, 0.1);
+}
+
+.app-select:disabled {
+  opacity: 0.4;
+}
+
+.app-select-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-select svg {
+  flex: none;
+  color: var(--text-2);
+  transition: transform 150ms;
+}
+
+.app-select.open svg {
+  transform: rotate(180deg);
+}
+
+.app-select-list {
+  position: fixed;
+  z-index: 20;
+  overflow-y: auto;
+  padding: 4px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.app-select-option {
+  padding: 5px 10px 5px 24px;
+  white-space: nowrap;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.app-select-option.active {
+  background: rgba(178, 178, 178, 0.16);
+}
+
+/* 選んでいる候補には左に印を付ける */
+.app-select-option[aria-selected='true'] {
+  background-image: radial-gradient(circle, var(--accent) 2.5px, transparent 3px);
+  background-repeat: no-repeat;
+  background-position: 10px center;
+  background-size: 8px 8px;
 }
 
 .field-list .check-row {

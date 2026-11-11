@@ -28,7 +28,7 @@ import { PlotOverlay } from './render/plotOverlay'
 import { ZoneOverlay } from './render/zoneOverlay'
 import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposure'
 import { CoverageGrid } from './sim/coverage'
-import { planCoverage } from './sim/coveragePlan'
+import { planCoverage, type MowPattern } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
 import { loadSettings, setupSettings, type AppSettings } from './settings'
@@ -53,6 +53,7 @@ import {
   addCheck,
   addPanelToggle,
   addReadout,
+  addSelect,
   addSlider,
   addSwitch,
   byId,
@@ -575,11 +576,17 @@ let accumulator = 0
 // 区分けや設定が変わったら、必要になった時点で作り直す
 const route = {
   options: { angleDeg: 0, overlap: 0.2, headlandPasses: 3 },
+  /** 刈り方(往復刈り、チェッカー)。起動時の指定 pattern=checker でも変えられる */
+  pattern: (query.get('pattern') === 'checker' ? 'checker' : 'stripes') as MowPattern,
   show: query.get('path') === '1'
 }
 /** 経路の設定(機体ごとの経路を作る所では、route が機体の経路を指すので、こちらから読む) */
 function routeOptions(): typeof route.options {
   return route.options
+}
+/** 刈り方(routeOptions と同じく、機体ごとの経路を作る所から読む) */
+function routePattern(): MowPattern {
+  return route.pattern
 }
 // 地面に描く経路の線。乗っている機体の経路を出す
 const pathLine = new PathLine(terrain)
@@ -627,13 +634,14 @@ function planRoute(unit: MowerUnit, team: MowerUnit[]): void {
     },
     {
       ...routeOptions(),
+      pattern: routePattern(),
       cutWidth: params.cutWidth,
       turnRadius: minTurnRadius(params) * 1.15,
       deckOffset: params.deckOffset,
       runIn: 1,
       share: team.length > 1 ? { index: team.indexOf(unit), count: team.length } : undefined,
       // 刈り終えた列と周は飛ばす(途中から作り直しても、刈った所を刈り直さない)
-      isCut: (x, z) => coverage.isCovered(x, z)
+      isCut: (x, z, bits) => coverage.isCovered(x, z, bits)
     },
     unit.state.x,
     unit.state.z,
@@ -1177,6 +1185,20 @@ syncs.push(
     },
     format: (v) => `${v.toFixed(0)} 台`
   }),
+  addSelect(
+    routeFields,
+    '刈り方',
+    '往復刈りは、まっすぐな列を行き来して縞の模様にします。チェッカーは、往復刈りのあと 90° 回した向きでもう一度刈り、市松の模様にします。どちらも最後に外周を回ります',
+    [
+      { value: 'stripes', label: '往復刈り(縞)' },
+      { value: 'checker', label: 'チェッカー(市松)' }
+    ],
+    () => route.pattern,
+    (v) => {
+      route.pattern = v
+      markRoutesDirty()
+    }
+  ),
   addSlider(routeFields, {
     label: '区画の広さ',
     title: '区画 1 つの広さの目安。刈れる範囲を、標高や斜面の向きが似た所どうしで、この広さの区画に分けます',
@@ -1746,6 +1768,8 @@ function stepSimulation(): void {
     cutHeight: sim.cutHeightMm / 1000,
     maxGrassHeight: MAX_GRASS_HEIGHT,
     dt: SIM_DT,
+    sweepAngle: (route.options.angleDeg * Math.PI) / 180,
+    crossCut: route.pattern === 'checker',
     onCut: (unit, newCells, deck) => {
       // まだ刈っていない所を通った分だけ、刈りカスが出る。長い芝ほど多い
       const length = grassField.lengthFactorAt((deck.lx + deck.rx) / 2, (deck.lz + deck.rz) / 2)

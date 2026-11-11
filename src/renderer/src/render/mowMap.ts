@@ -4,12 +4,15 @@
 //   A   : 芝丈(0〜1 が 0〜maxHeight m に対応する)
 // 更新は GPU 上で行う。刈刃が通った帯を四角形として描き込む。
 // 芝丈は「今より低いときだけ下げる」(MIN 合成)、向きと鮮度は上書きする。
+// 交差して刈るとき(チェッカー刈りの 2 回目)は、向きを上書きせず、前の向きと半分ずつ混ぜる(addQuad の blend)。
 
 import {
   BufferAttribute,
   BufferGeometry,
   Camera,
   ClampToEdgeWrapping,
+  Color,
+  ConstantColorFactor,
   CustomBlending,
   AddEquation,
   DoubleSide,
@@ -18,6 +21,7 @@ import {
   MinEquation,
   NoBlending,
   OneFactor,
+  OneMinusConstantColorFactor,
   RGBAFormat,
   Scene,
   ShaderMaterial,
@@ -41,6 +45,8 @@ export interface MowMapOptions {
 }
 
 const MAX_QUADS = 2048
+/** 交差して刈るとき、新しい向きを混ぜる割合。残りは前の向き(鮮度は上書き) */
+const CROSS_BLEND = 0.5
 const VERTS_PER_QUAD = 6
 
 const VERTEX_SHADER = /* glsl */ `
@@ -78,8 +84,12 @@ export class MowMap {
   private readonly geometry: BufferGeometry
   private readonly stampMaterial: ShaderMaterial
   private readonly fillMaterial: ShaderMaterial
+  /** 交差して刈るときの描き込み。向きを前の向きと混ぜる */
+  private readonly blendMaterial: ShaderMaterial
   private readonly mesh: Mesh
   private quadCount = 0
+  /** たまっている四角形が、混ぜる描き込みか */
+  private batchBlend = false
 
   constructor(
     private readonly renderer: WebGLRenderer,
@@ -121,6 +131,11 @@ export class MowMap {
       blendSrcAlpha: OneFactor,
       blendDstAlpha: OneFactor
     })
+    // 色は「新しい向き × 割合 + 前の向き × (1 − 割合)」。鮮度(B)は割合 1 で上書きする。芝丈(A)は MIN 合成のまま
+    this.blendMaterial = this.stampMaterial.clone()
+    this.blendMaterial.blendSrc = ConstantColorFactor
+    this.blendMaterial.blendDst = OneMinusConstantColorFactor
+    this.blendMaterial.blendColor = new Color(CROSS_BLEND, CROSS_BLEND, 1)
     this.fillMaterial = new ShaderMaterial({
       uniforms: { uFreshness: { value: 0 } },
       vertexShader: VERTEX_SHADER,
@@ -153,6 +168,7 @@ export class MowMap {
    * 前の左端、前の右端、今の右端、今の左端の順に渡す。
    * dirX, dirZ は芝を倒す向きと強さ(長さ 1 で完全に寝る)。
    * cutHeight は刈高。maxHeight を渡すと芝丈は変えず、倒すだけになる(車輪の跡)。
+   * blend なら、倒す向きを上書きせず、前の向きと混ぜる(交差して刈るとき)。
    */
   addQuad(
     ax: number,
@@ -166,9 +182,12 @@ export class MowMap {
     dirX: number,
     dirZ: number,
     cutHeight: number,
-    featherTexels = 1.5
+    featherTexels = 1.5,
+    blend = false
   ): void {
-    if (this.quadCount >= MAX_QUADS) this.flush()
+    // 混ぜるかどうかで材質が違うので、切り替わるときは、たまった分を先に描き込む
+    if (this.quadCount >= MAX_QUADS || (this.quadCount > 0 && blend !== this.batchBlend)) this.flush()
+    this.batchBlend = blend
     const o = this.options
     const sx = 2 / o.size
     // 両脇を featherTexels テクセルぶん外へ広げ、そこを縁のぼかしに使う
@@ -198,13 +217,14 @@ export class MowMap {
   /** たまった四角形をまとめて描き込む */
   flush(): void {
     if (this.quadCount === 0) return
-    this.draw(this.stampMaterial)
+    this.draw(this.batchBlend ? this.blendMaterial : this.stampMaterial)
   }
 
   dispose(): void {
     this.target.dispose()
     this.geometry.dispose()
     this.stampMaterial.dispose()
+    this.blendMaterial.dispose()
     this.fillMaterial.dispose()
   }
 
