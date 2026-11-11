@@ -67,12 +67,17 @@ export class PathLine {
   private readonly fillMaterial: ShaderMaterial
   private readonly outline = new Ribbon({ width: 2.5 })
   private readonly transit = new Ribbon({ width: 2.5, opacity: 0.75 })
-  private readonly cutColor: Color = overlayColor(OVERLAY_PALETTE.teal)
+  private readonly cutColor: Color
   private readonly transitColor: Color = overlayColor(OVERLAY_PALETTE.snow)
   private shown = false
   private opacity = 0
 
-  constructor(private readonly terrain: Terrain) {
+  constructor(
+    private readonly terrain: Terrain,
+    /** 刈る区間の色(OVERLAY_PALETTE の色)。複数台の経路を並べて出すときに、機体ごとに変える */
+    cutColor: string = OVERLAY_PALETTE.teal
+  ) {
+    this.cutColor = overlayColor(cutColor)
     this.fillMaterial = new ShaderMaterial({
       uniforms: { uColor: { value: this.cutColor }, uDone: { value: 0 }, uFade: { value: 0 } },
       vertexShader: ARROW_VS,
@@ -232,5 +237,13 @@ export class PathLine {
       }
       travelled += segment
     }
+  }
+
+  /** 形と材質を片付ける。台数を減らして機体を消すときに呼ぶ(シーンから外すのは呼ぶ側) */
+  dispose(): void {
+    this.fill.geometry.dispose()
+    this.fillMaterial.dispose()
+    this.outline.dispose()
+    this.transit.dispose()
   }
 }

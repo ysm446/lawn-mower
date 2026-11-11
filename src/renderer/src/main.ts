@@ -20,7 +20,7 @@ import { NormalPreview } from './render/normalPreview'
 import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
-import { overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
+import { OVERLAY_PALETTE, overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
 import { Trees } from './render/trees'
 import { DofPass, MeterPass } from './render/postfx'
@@ -523,6 +523,7 @@ function setMowerCount(count: number): void {
     if (unit === rider) leaveMower()
     scene.remove(unit.model.root)
     unit.model.dispose()
+    removePathLine(unit)
   }
   while (mowers.length < n) {
     const unit = new MowerUnit(mowers.length, params, START_X, START_Z, 0)
@@ -533,7 +534,7 @@ function setMowerCount(count: number): void {
     const pose = startPose(i)
     unit.reset(pose.x, pose.z, pose.heading)
   })
-  refreshPathLine()
+  refreshPathLines()
   refreshPlotOverlay()
 }
 for (let i = 0; i < initialMowers; i++) {
@@ -588,13 +589,47 @@ function routeOptions(): typeof route.options {
 function routePattern(): MowPattern {
   return route.pattern
 }
-// 地面に描く経路の線。乗っている機体の経路を出す
-const pathLine = new PathLine(terrain)
-scene.add(pathLine.lines)
-
-/** 経路の線を、乗っている機体の経路に描き直す */
-function refreshPathLine(): void {
-  pathLine.update(rider?.route.plan?.path ?? null)
+// 地面に描く経路の線。機体ごとに 1 本持つ。乗っているときはその機体の経路だけを、
+// 誰にも乗っていないときは全台の経路を出す(syncPathLines)。色は機体ごとに変える
+const PATH_COLORS = [
+  OVERLAY_PALETTE.teal,
+  OVERLAY_PALETTE.gold,
+  OVERLAY_PALETTE.coral,
+  OVERLAY_PALETTE.violet,
+  OVERLAY_PALETTE.sky
+]
+const pathLines = new Map<MowerUnit, PathLine>()
+/** 機体の経路の線(なければ作る) */
+function pathLineOf(unit: MowerUnit): PathLine {
+  let line = pathLines.get(unit)
+  if (!line) {
+    line = new PathLine(terrain, PATH_COLORS[unit.index % PATH_COLORS.length])
+    scene.add(line.lines)
+    pathLines.set(unit, line)
+  }
+  return line
+}
+/** 消した機体の経路の線を片付ける */
+function removePathLine(unit: MowerUnit): void {
+  const line = pathLines.get(unit)
+  if (!line) return
+  scene.remove(line.lines)
+  line.dispose()
+  pathLines.delete(unit)
+}
+/** 全台の経路の線を、今の経路に描き直す */
+function refreshPathLines(): void {
+  for (const unit of mowers) pathLineOf(unit).update(unit.route.plan?.path ?? null)
+}
+/** 経路の線を出すか、走り終えた所までを薄くするかを合わせ、現れたり消えたりする途中を進める。毎フレーム呼ぶ */
+function syncPathLines(dt: number): void {
+  for (const unit of mowers) {
+    const line = pathLineOf(unit)
+    line.visible = route.show && (!rider || unit === rider)
+    const follower = unit.route.follower
+    line.done = follower && (unit.autoDrive || follower.segment > 0) ? follower.progress : 0
+    line.tick(dt)
+  }
 }
 
 const formatKm = (m: number): string => `${(m / 1000).toFixed(2)} km`
@@ -649,7 +684,7 @@ function planRoute(unit: MowerUnit, team: MowerUnit[]): void {
   )
   route.plan = plan
   route.follower = new PathFollower(plan.path, params)
-  if (unit === rider) refreshPathLine()
+  pathLineOf(unit).update(plan.path)
   refreshPlotOverlay()
   // 旋回や外周では操舵に応じて減速するので、その分を大まかに見込む
   const seconds =
@@ -676,7 +711,7 @@ function resetAll(): void {
   timeSettings.hour = queryHour > 0 ? queryHour : START_HOUR
   // 区画は最初の状態に戻す(刈り終えた印を消す)
   plotting.dirty = true
-  refreshPathLine()
+  refreshPathLines()
   accumulator = 0
   coverage.reset()
   clippings.clear()
@@ -1168,7 +1203,6 @@ syncs.push(
   addPanelToggle(byId('route-panel'), '区画と経路', 'G', () => route.show, setRouteShow),
 
   () => {
-    pathLine.visible = route.show
     plotOverlay.visible = route.show
   },
   addSlider(routeFields, {
@@ -1302,7 +1336,6 @@ function boardMower(unit: MowerUnit, mode: CameraMode = 'chase'): void {
   // カメラが追う位置を、今の機体の位置から始める(タイムラプスで、前の機体の位置から滑ってこないように)
   Object.assign(unit.cameraTarget, unit.state)
   if (wasFree) rig.setMode(mode)
-  refreshPathLine()
   refreshPlotOverlay()
   syncUi()
 }
@@ -1313,7 +1346,6 @@ function leaveMower(): void {
   rig.setFreeFocus(rider.state.x, rider.state.z)
   rider = null
   rig.setMode('top')
-  refreshPathLine()
   refreshPlotOverlay()
   syncUi()
 }
@@ -1952,7 +1984,7 @@ function frame(now: number): void {
   if (zoning.dirty) updateZoning()
   // 経路は、自動運転の機体と、区画と経路を表示しているときの乗っている機体の分を作る。重いので 1 フレームに 1 台まで
   checkTeams()
-  const needsRoute = mowers.find((m) => m.route.dirty && (m.autoDrive || (route.show && m === rider)))
+  const needsRoute = mowers.find((m) => m.route.dirty && (m.autoDrive || (route.show && (!rider || m === rider))))
   if (needsRoute) updateRoute(needsRoute)
   else if (plotting.dirty && route.show) updatePlots()
 
@@ -1979,11 +2011,9 @@ function frame(now: number): void {
   ground.uniforms.uWindStrength.value = windSettings.strength
   // 後から読み込んだモデルの材質も、影の仕組みに対応させる
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
-  pathLine.tick(dt)
+  syncPathLines(dt)
   plotOverlay.tick(dt)
   zoneOverlay.tick(dt)
-  const riding = rider?.route.follower
-  pathLine.done = rider && riding && (rider.autoDrive || riding.segment > 0) ? riding.progress : 0
   grassBlades.update(rig.camera, bladeSettings.show)
   // 法線マップは、読み出しで描画が少し止まるので、0.2 秒ごとに描き直す。誰にも乗っていないときは、見ている所を中心にする
   if (debugSettings.normals && (normalTimer -= dt) <= 0) {

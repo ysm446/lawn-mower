@@ -123,6 +123,12 @@ export class Ribbon {
     this.mesh.frustumCulled = false
   }
 
+  /** 形と材質を片付ける */
+  dispose(): void {
+    this.mesh.geometry.dispose()
+    this.material.dispose()
+  }
+
   set dashes(count: number) {
     this.material.uniforms.uDashes.value = count
   }
