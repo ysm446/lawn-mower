@@ -13,6 +13,14 @@ export interface CameraSettings {
   iso: number
   /** 露出補正(EV)。正で明るくなる */
   exposureCompensation: number
+  /** 自動露出。画面の明るさに合わせてシャッター速度を決める */
+  autoExposure: boolean
+  /** 被写界深度(ピントの合う範囲の外をぼかす) */
+  depthOfField: boolean
+  /** ミニチュア倍率。被写体を 1 / 倍率 の大きさの模型とみなして、ぼけを計算する */
+  miniatureScale: number
+  /** ティルト(度)。ピントの合う面を傾ける */
+  tiltDeg: number
 }
 
 export const DEFAULT_CAMERA_SETTINGS: CameraSettings = {
@@ -21,7 +29,11 @@ export const DEFAULT_CAMERA_SETTINGS: CameraSettings = {
   fNumber: 5.6,
   shutterTime: 1 / 500,
   iso: 100,
-  exposureCompensation: 0
+  exposureCompensation: 0,
+  autoExposure: true,
+  depthOfField: true,
+  miniatureScale: 30,
+  tiltDeg: 0
 }
 
 /** ISO 100 に換算した露出値 */
@@ -44,4 +56,35 @@ export function exposureFromSettings(s: CameraSettings): number {
 /** 水平画角(ラジアン) */
 export function horizontalFov(sensorWidth: number, focalLength: number): number {
   return 2 * Math.atan(sensorWidth / (2 * focalLength))
+}
+
+/** 反射光式の露出計の定数(cd/m²)。平均の輝度がこの基準で中間の明るさになる */
+const METER_CONSTANT = 12.5
+
+/** 平均の輝度(cd/m²)に対して、標準の明るさになる露出値(ISO 100 換算) */
+export function ev100FromLuminance(luminance: number): number {
+  return Math.log2((luminance * 100) / METER_CONSTANT)
+}
+
+/** 露出値(ISO 100 換算)になるシャッター速度(秒) */
+export function shutterTimeForEv100(ev: number, fNumber: number, iso: number): number {
+  return (fNumber * fNumber) / (Math.pow(2, ev) * (iso / 100))
+}
+
+/**
+ * ぼけの直径(センサー上、mm)。薄いレンズの式による。
+ * focusDistance はピントを合わせた距離、distance は被写体までの距離(m)。
+ * scale はミニチュア倍率で、被写体が 1 / scale の大きさで、その分だけ近くにあるとみなす。
+ */
+export function blurDiameter(
+  focalLength: number,
+  fNumber: number,
+  focusDistance: number,
+  distance: number,
+  scale = 1
+): number {
+  const f = focalLength / 1000
+  const s = Math.max(focusDistance / scale, f * 1.5)
+  const d = Math.max(distance / scale, 1e-4)
+  return ((f * f * Math.abs(d - s)) / (fNumber * d * (s - f))) * 1000
 }

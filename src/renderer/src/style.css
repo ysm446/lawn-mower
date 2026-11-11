@@ -319,6 +319,39 @@ button:active:not(:disabled) {
   white-space: nowrap;
 }
 
+/* チェックボックスの 1 行(weather-globe と同じ見た目) */
+.field-list .check-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+input[type='checkbox'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  background: var(--field) center / 12px 12px no-repeat;
+  border: 1px solid rgba(178, 178, 178, 0.45);
+  border-radius: 4px;
+  cursor: pointer;
+  appearance: none;
+}
+
+input[type='checkbox']:hover {
+  border-color: rgba(178, 178, 178, 0.8);
+}
+
+input[type='checkbox']:checked {
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23121212' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E");
+  border-color: var(--accent);
+}
+
 .range-row {
   display: flex;
   align-items: center;

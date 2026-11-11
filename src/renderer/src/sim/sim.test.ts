@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { CoverageGrid } from './coverage'
-import { LineDriver } from './lineDriver'
 import {
   FAIRWAY_MOWER,
   createVehicleState,
@@ -79,28 +78,5 @@ describe('CoverageGrid', () => {
     const g = new CoverageGrid(0, 0, 10, 10, 0.5)
     g.markSegment(-5, -5, -1, -1)
     expect(g.coveredArea).toBe(0)
-  })
-})
-
-describe('LineDriver', () => {
-  it('往復して範囲の大半を刈り終える', () => {
-    const config = { startX: 0, spacing: 2.8, lines: 6, zMin: 0, zMax: 40, headland: 10 }
-    const driver = new LineDriver(config, FAIRWAY_MOWER)
-    const s = createVehicleState(0, -12, 0)
-    const g = new CoverageGrid(-1.5, 0, 6 * 2.8 + 0.2, 40, 0.5)
-    let finished = false
-    for (let i = 0; i < 120 * 600 && !finished; i++) {
-      const out = driver.update(s)
-      finished = out.finished
-      s.deckDown = out.deckDown
-      stepVehicle(s, out, FAIRWAY_MOWER, DT)
-      if (s.deckDown) {
-        const d = deckSegment(s, FAIRWAY_MOWER)
-        g.markSegment(d.lx, d.lz, d.rx, d.rz)
-      }
-    }
-    expect(finished).toBe(true)
-    const total = (6 * 2.8 + 0.2) * 40
-    expect(g.coveredArea / total).toBeGreaterThan(0.97)
   })
 })

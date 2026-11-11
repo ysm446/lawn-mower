@@ -1,9 +1,11 @@
 import './style.css'
 import {
   ACESFilmicToneMapping,
+  DepthTexture,
   HalfFloatType,
   PCFShadowMap,
   Scene,
+  Vector3,
   WebGLRenderTarget,
   WebGLRenderer
 } from 'three'
@@ -16,10 +18,13 @@ import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
 import { MowerModel } from './render/mowerModel'
+import { PathLine } from './render/pathLine'
+import { DofPass, MeterPass } from './render/postfx'
 import { ZoneOverlay } from './render/zoneOverlay'
-import { ev100 } from './camera/exposure'
+import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposure'
 import { CoverageGrid } from './sim/coverage'
-import { LineDriver } from './sim/lineDriver'
+import { planCoverage, type CoveragePlan } from './sim/coveragePlan'
+import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
 import {
   DEFAULT_ZONING,
@@ -33,20 +38,21 @@ import {
   FAIRWAY_MOWER,
   createVehicleState,
   deckSegment,
+  minTurnRadius,
   stepVehicle,
   type DeckSegment
 } from './sim/vehicle'
-import { addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
+import { addCheck, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
 
 // 単位はすべて実寸(1 = 1 m)
-const FIELD_SIZE = 256
+const FIELD_SIZE = 512
 const FIELD_ORIGIN = -FIELD_SIZE / 2
 const GROUND_EXTENT = 7000
 const MAX_GRASS_HEIGHT = 0.2
 const UNCUT_HEIGHT = 0.07
 const SIM_DT = 1 / 120
 const MAX_STEPS_PER_FRAME = 600
-const TIME_SCALES = [1, 2, 4, 8, 16]
+const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64]
 // 芝刈り機の出発点
 const START_X = -21
 const START_Z = -55
@@ -62,6 +68,7 @@ const SHUTTER_STOPS = [
 const ISO_STOPS = [50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1600, 3200, 6400]
 const FOCAL_MIN = 12
 const FOCAL_MAX = 400
+const MINIATURE_MAX = 200
 
 const query = new URLSearchParams(window.location.search)
 
@@ -80,7 +87,7 @@ const lighting = new Lighting(scene)
 
 const mowMap = new MowMap(renderer, {
   size: FIELD_SIZE,
-  resolution: 2048,
+  resolution: 4096,
   originX: FIELD_ORIGIN,
   originZ: FIELD_ORIGIN,
   maxHeight: MAX_GRASS_HEIGHT
@@ -117,6 +124,7 @@ function updateZoning(): void {
     (START_Z - terrain.origin) / terrain.options.cell
   )
   zoning.result = result
+  route.dirty = true
   zoneOverlay.update(result)
   const total = result.zoneArea.reduce((a, b) => a + b)
   const area = (m2: number): string =>
@@ -139,9 +147,18 @@ const coverage = new CoverageGrid(FIELD_ORIGIN, FIELD_ORIGIN, FIELD_SIZE, FIELD_
 // HDR(半精度浮動小数点)で描いてから、トーンマッピングして画面に出す
 const composer = new EffectComposer(
   renderer,
-  new WebGLRenderTarget(1, 1, { type: HalfFloatType, samples: 4 })
+  new WebGLRenderTarget(1, 1, {
+    type: HalfFloatType,
+    samples: 4,
+    // 被写界深度で使うので、深度も読める形で持つ
+    depthTexture: new DepthTexture(1, 1)
+  })
 )
+const meterPass = new MeterPass()
+const dofPass = new DofPass()
 composer.addPass(new RenderPass(scene, rig.camera))
+composer.addPass(meterPass)
+composer.addPass(dofPass)
 composer.addPass(new OutputPass())
 
 const sim = {
@@ -152,29 +169,94 @@ const sim = {
   elapsed: 0,
   distance: 0
 }
-let driver = createDriver()
 let prevDeck: DeckSegment | null = null
 let accumulator = 0
 
-function createDriver(): LineDriver {
-  return new LineDriver(
-    { startX: START_X, spacing: 2.8, lines: 16, zMin: -40, zMax: 40, headland: 10 },
-    params
+// 自動運転の経路。区分けや設定が変わったら、必要になった時点で作り直す
+const route = {
+  options: { angleDeg: 0, overlap: 0.2, headlandPasses: 3 },
+  // 刈る範囲の一辺(m)。出発点を中心とする正方形に絞る。FIELD_SIZE 以上なら絞らない
+  extent: 120,
+  show: query.get('path') === '1',
+  dirty: true,
+  plan: null as CoveragePlan | null,
+  follower: null as PathFollower | null,
+  text: { area: '-', lines: '-', cut: '-', transit: '-', time: '-' }
+}
+const pathLine = new PathLine(terrain)
+scene.add(pathLine.lines)
+
+const formatKm = (m: number): string => `${(m / 1000).toFixed(2)} km`
+
+/** 今いる所を出発点として、乗用機で刈れて届く範囲の経路を作る */
+function updateRoute(): void {
+  if (zoning.dirty || !zoning.result) updateZoning()
+  route.dirty = false
+  const result = zoning.result as ZoningResult
+  const n = result.samples
+  const cell = terrain.options.cell
+  const startIx = Math.round((START_X - terrain.origin) / cell)
+  const startIz = Math.round((START_Z - terrain.origin) / cell)
+  const half = route.extent >= FIELD_SIZE ? Infinity : route.extent / 2 / cell
+  // 出発点から、届く範囲と正方形の両方に入る所だけをたどって広げる
+  const mask = new Uint8Array(n * n)
+  const stack = [startIz * n + startIx]
+  while (stack.length > 0) {
+    const i = stack.pop() as number
+    if (mask[i] === 1 || !result.regions[result.labels[i]].reachable) continue
+    const ix = i % n
+    const iz = (i - ix) / n
+    if (Math.abs(ix - startIx) > half || Math.abs(iz - startIz) > half) continue
+    mask[i] = 1
+    if (ix > 0) stack.push(i - 1)
+    if (ix < n - 1) stack.push(i + 1)
+    if (iz > 0) stack.push(i - n)
+    if (iz < n - 1) stack.push(i + n)
+  }
+  const plan = planCoverage(
+    { samples: terrain.samples, cell: terrain.options.cell, origin: terrain.origin, mask },
+    {
+      ...route.options,
+      cutWidth: params.cutWidth,
+      turnRadius: minTurnRadius(params) * 1.15,
+      deckOffset: params.deckOffset,
+      runIn: 1
+    },
+    sim.state.x,
+    sim.state.z,
+    sim.state.heading
   )
+  route.plan = plan
+  route.follower = new PathFollower(plan.path, params)
+  pathLine.update(plan.path)
+  // 旋回や外周では操舵に応じて減速するので、その分を大まかに見込む
+  const seconds =
+    plan.cutLength / (params.maxSpeed * 0.85) +
+    plan.transitLength / (params.maxSpeed * DEFAULT_FOLLOWER.transitThrottle * 0.5)
+  let cells = 0
+  for (let i = 0; i < mask.length; i++) cells += mask[i]
+  route.text = {
+    area: `${((cells * cell * cell) / 10000).toFixed(2)} ha`,
+    lines: `${plan.sweepCount}`,
+    cut: formatKm(plan.cutLength),
+    transit: formatKm(plan.transitLength),
+    time: formatTime(seconds)
+  }
 }
 
 function resetAll(): void {
   sim.state = createVehicleState(START_X, START_Z, 0)
   sim.elapsed = 0
   sim.distance = 0
-  driver = createDriver()
+  route.dirty = true
+  route.follower = null
   prevDeck = null
   accumulator = 0
   coverage.reset()
   mowMap.reset(UNCUT_HEIGHT)
 }
 
-// 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1
+// 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1&path=1
 if (query.get('auto') === '1') sim.autoDrive = true
 const queryScale = Number(query.get('timescale'))
 if (queryScale > 0) sim.timeScale = queryScale
@@ -199,13 +281,32 @@ const setStatus = addReadout(byId('status-readout'), {
 })
 const setCameraReadout = addReadout(byId('camera-readout'), {
   lens: 'レンズ',
-  exposure: '露出'
+  exposure: '露出',
+  focus: 'ピント'
 })
 const fpsCounter = byId('fps-counter')
 
 const cameraFields = byId('camera-fields')
 const focalRange = Math.log(FOCAL_MAX / FOCAL_MIN)
 syncs.push(
+  addCheck(
+    cameraFields,
+    '自動露出',
+    '画面の明るさに合わせて、シャッター速度を自動で決めます。F 値や ISO を変えても明るさが保たれます',
+    () => rig.settings.autoExposure,
+    (v) => {
+      rig.settings.autoExposure = v
+    }
+  ),
+  addCheck(
+    cameraFields,
+    '被写界深度',
+    '機体にピントを合わせ、手前や奥へ離れるほどぼかします。F 値が小さいほど、焦点距離が長いほど強くぼけます',
+    () => rig.settings.depthOfField,
+    (v) => {
+      rig.settings.depthOfField = v
+    }
+  ),
   addSlider(cameraFields, {
     label: '焦点距離',
     title: 'レンズの焦点距離。大きいほど望遠になります。視点を切り替えると、その視点の初期値に戻ります',
@@ -268,6 +369,30 @@ syncs.push(
       rig.settings.exposureCompensation = v
     },
     format: (v) => `${v > 0.01 ? '+' : ''}${v.toFixed(1)} EV`
+  }),
+  addSlider(cameraFields, {
+    label: 'ミニチュア倍率',
+    title: '景色を「1 / 倍率 の大きさの模型」とみなして、ぼけを計算します。大きいほど模型を近くで撮ったような強いぼけになります。1 で実物どおり',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    get: () => Math.log(rig.settings.miniatureScale) / Math.log(MINIATURE_MAX),
+    set: (t) => {
+      rig.settings.miniatureScale = Math.round(Math.pow(MINIATURE_MAX, t))
+    },
+    format: (t) => `${Math.round(Math.pow(MINIATURE_MAX, t))} 倍`
+  }),
+  addSlider(cameraFields, {
+    label: 'ティルト',
+    title: 'ピントの合う面を傾けます。正で画面の上側(奥)が、負で下側(手前)が、より強くぼけます',
+    min: -60,
+    max: 60,
+    step: 1,
+    get: () => rig.settings.tiltDeg,
+    set: (v) => {
+      rig.settings.tiltDeg = v
+    },
+    format: (v) => `${v.toFixed(0)}°`
   })
 )
 
@@ -399,6 +524,73 @@ syncs.push(
 )
 if (zoning.show) byId<HTMLDetailsElement>('zone-panel').open = true
 
+const setRouteReadout = addReadout(byId('route-readout'), {
+  area: '刈る面積',
+  lines: '列の数',
+  cut: '刈る距離',
+  transit: '移動距離',
+  time: '所要時間の目安',
+  progress: '進み具合'
+})
+const routeFields = byId('route-fields')
+const routeSlider = (
+  label: string,
+  title: string,
+  key: keyof typeof route.options,
+  min: number,
+  max: number,
+  step: number,
+  format: (v: number) => string
+): Sync =>
+  addSlider(routeFields, {
+    label,
+    title,
+    min,
+    max,
+    step,
+    get: () => route.options[key],
+    set: (v) => {
+      route.options[key] = v
+      route.dirty = true
+    },
+    format
+  })
+function setRouteShow(on: boolean): void {
+  route.show = on
+  syncUi()
+}
+syncs.push(
+  addSwitch(
+    byId('route-switch'),
+    [
+      { value: false, label: '隠す', title: '経路を表示しない(G)' },
+      { value: true, label: '表示', title: '経路を線で表示する(G)。暗い線は刈刃を上げて移動する区間' }
+    ],
+    () => route.show,
+    setRouteShow
+  ),
+  () => {
+    pathLine.visible = route.show
+  },
+  addSlider(routeFields, {
+    label: '刈る範囲',
+    title: '出発点を中心とする正方形の一辺。右端まで動かすと全体を刈る',
+    min: 40,
+    max: FIELD_SIZE,
+    step: 4,
+    get: () => route.extent,
+    set: (v) => {
+      route.extent = v
+      route.dirty = true
+    },
+    format: (v) => (v >= FIELD_SIZE ? '全体' : `${v.toFixed(0)} m 四方`)
+  }),
+  routeSlider('刈る向き', '往復刈りの列の向き。0° で画面の奥行き方向', 'angleDeg', 0, 175, 5, (v) => `${v.toFixed(0)}°`),
+  routeSlider('重ねる幅', '隣の列と重ねる幅。刈り残しを防ぐ', 'overlap', 0, 1, 0.05, (v) => `${(v * 100).toFixed(0)} cm`),
+  routeSlider('外周の周回', '最後に境界沿いを回る回数。旋回の場所にもなる', 'headlandPasses', 0, 5, 1, (v) => `${v.toFixed(0)} 周`)
+)
+if (route.show) byId<HTMLDetailsElement>('route-panel').open = true
+
 syncs.push(
   addSwitch(
     byId('speed-switch'),
@@ -430,11 +622,13 @@ syncs.push(
 const autoButton = byId<HTMLButtonElement>('toggle-auto')
 function setAutoDrive(on: boolean): void {
   sim.autoDrive = on
+  // まだ走り出していない経路は、今いる所から作り直す
+  if (on && (!route.follower || route.follower.segment === 0)) route.dirty = true
   syncUi()
 }
 syncs.push(() => {
   autoButton.setAttribute('aria-pressed', String(sim.autoDrive))
-  const label = sim.autoDrive ? '自動運転(仮)を止める' : '自動運転(仮)'
+  const label = sim.autoDrive ? '自動運転を止める' : '自動運転'
   autoButton.setAttribute('aria-label', label)
   autoButton.title = `${label}(P)`
 })
@@ -470,8 +664,9 @@ const toggleHelp = setupHelp([
   {
     title: 'シミュレーション',
     items: [
-      { keys: ['1', '〜', '5'], text: '倍速(1、2、4、8、16 倍)' },
-      { keys: ['P'], text: '自動運転(仮)の開始と停止' },
+      { keys: ['1', '〜', '7'], text: '倍速(1、2、4、8、16、32、64 倍)' },
+      { keys: ['P'], text: '自動運転の開始と停止' },
+      { keys: ['G'], text: '経路の表示と非表示' },
       { keys: ['R'], text: 'やり直し(芝を元に戻す)' },
       { keys: ['Z'], text: '勾配による区分けの表示と非表示' }
     ]
@@ -493,6 +688,7 @@ input.onPress('KeyC', () => {
 })
 input.onPress('KeyP', () => setAutoDrive(!sim.autoDrive))
 input.onPress('KeyR', resetAll)
+input.onPress('KeyG', () => setRouteShow(!route.show))
 input.onPress('KeyZ', () => setZoneShow(!zoning.show))
 input.onPress('Slash', toggleHelp)
 TIME_SCALES.forEach((scale, i) => {
@@ -508,10 +704,11 @@ syncUi()
 function stepSimulation(): void {
   const state = sim.state
   let vehicleInput = input.read()
-  if (sim.autoDrive) {
-    const out = driver.update(state)
+  if (sim.autoDrive && route.follower) {
+    const out = route.follower.update(state)
     vehicleInput = out
     state.deckDown = out.deckDown
+    if (out.finished) setAutoDrive(false)
   }
 
   const grade = terrain.gradeAlong(state.x, state.z, state.heading, params.wheelbase)
@@ -573,12 +770,21 @@ function updateReadouts(dt: number): void {
   })
   setCameraReadout({
     lens: `${s.focalLength.toFixed(0)} mm  F${s.fNumber}`,
+    focus: `${focusDistance.toFixed(1)} m`,
     exposure: `1/${Math.round(1 / s.shutterTime)} 秒  ISO ${s.iso}  EV ${ev100(s.fNumber, s.shutterTime, s.iso).toFixed(1)}`
   })
-  const fpsText = `${fps.toFixed(0)} fps`
+  setRouteReadout({
+    ...route.text,
+    progress: route.follower ? `${(route.follower.progress * 100).toFixed(1)}%` : '-'
+  })
+  const fpsText =`${fps.toFixed(0)} fps`
   if (fpsCounter.textContent !== fpsText) fpsCounter.textContent = fpsText
 }
 
+let focusDistance = 0
+let autoSyncTimer = 0
+const viewDirection = new Vector3()
+const scratch = new Vector3()
 let last = performance.now()
 function frame(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1)
@@ -594,11 +800,47 @@ function frame(now: number): void {
   if (steps === MAX_STEPS_PER_FRAME) accumulator = 0
   mowMap.flush()
   if (zoning.dirty) updateZoning()
+  if (route.dirty && (route.show || sim.autoDrive)) updateRoute()
 
   mower.sync(sim.state, dt * sim.timeScale, terrain)
   rig.update(sim.state, dt, terrain)
-  lighting.update(rig.exposure, rig.focusPoint, rig.camera.position)
+  const exposure = rig.exposure
+  lighting.update(exposure, rig.focusPoint, rig.camera.position)
+
+  // ピントは機体に合わせる。視線に沿った距離で持つ
+  const s = rig.settings
+  const focusTarget = Math.max(
+    0.5,
+    viewDirection.copy(rig.focusPoint).sub(rig.camera.position).dot(rig.camera.getWorldDirection(scratch))
+  )
+  focusDistance = focusDistance === 0 ? focusTarget : focusDistance + (focusTarget - focusDistance) * Math.min(1, dt * 6)
+  dofPass.enabled = s.depthOfField
+  dofPass.update({
+    focalLength: s.focalLength,
+    fNumber: s.fNumber,
+    sensorWidth: s.sensorWidth,
+    focusDistance,
+    scale: s.miniatureScale,
+    tiltDeg: s.tiltDeg,
+    fovY: rig.camera.fov,
+    near: rig.camera.near,
+    far: rig.camera.far
+  })
   composer.render()
+
+  // 自動露出: 測った明るさが標準の明るさになる露出へ、少しずつ寄せる
+  if (s.autoExposure && meterPass.log2Average !== null) {
+    const luminance = Math.pow(2, meterPass.log2Average) / exposure
+    const target = ev100FromLuminance(luminance)
+    const current = ev100(s.fNumber, s.shutterTime, s.iso)
+    const next = current + (target - current) * (1 - Math.exp(-dt * 3))
+    s.shutterTime = Math.min(Math.max(shutterTimeForEv100(next, s.fNumber, s.iso), 1 / 32000), 0.5)
+    autoSyncTimer += dt
+    if (autoSyncTimer > 0.5) {
+      autoSyncTimer = 0
+      syncUi()
+    }
+  }
   updateReadouts(dt)
   requestAnimationFrame(frame)
 }

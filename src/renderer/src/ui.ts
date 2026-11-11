@@ -90,6 +90,32 @@ export function stopsSlider(
   }
 }
 
+/** チェックボックスの 1 行を追加する */
+export function addCheck(
+  parent: HTMLElement,
+  label: string,
+  title: string,
+  get: () => boolean,
+  set: (value: boolean) => void
+): Sync {
+  const row = document.createElement('label')
+  row.className = 'check-row'
+  row.title = title
+  const input = document.createElement('input')
+  input.type = 'checkbox'
+  row.append(input, label)
+  parent.append(row)
+  input.addEventListener('change', () => {
+    set(input.checked)
+    input.blur() // Space などのキー操作がチェックに取られないようにする
+  })
+  const sync = (): void => {
+    input.checked = get()
+  }
+  sync()
+  return sync
+}
+
 export interface SwitchOption<T> {
   value: T
   label: string
