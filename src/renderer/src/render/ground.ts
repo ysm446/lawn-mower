@@ -12,7 +12,8 @@ import {
   Mesh,
   RedFormat,
   UnsignedByteType,
-  MeshStandardMaterial,
+  Color,
+  MeshPhysicalMaterial,
   Vector2,
   Vector3
 } from 'three'
@@ -107,6 +108,13 @@ vec4 mowSample(vec2 xz) {
   return vec4(lean.rg, edge.b, edge.a);
 }
 
+// 芝のつや(シーン)の強さ。刈り込んだ芝は葉が細かく揃って寝ているので、ビロードのように、
+// かすめる角度や逆光でふわっと明るく光る。伸びた芝は葉がばらばらで、つやは弱い
+float grassSheen(vec4 state) {
+  // 荒れ草地の草は、刈っても手入れされた芝ほど細かく揃わないので、つやは弱い
+  return mix(0.3, mix(1.0, 0.5, uRough), 1.0 - smoothstep(0.02, 0.06, state.a * uMaxHeight));
+}
+
 // 近景の芝の葉を描く範囲の濃さ(中心で 1、縁で 0)
 float bladeCoverage(vec2 xz) {
   return uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, length(xz - uBladeCenter)));
@@ -140,7 +148,8 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   // 刈った所には、刈り株の淡い色がまだらに出る(伸びた草の根元は、日が当たらず色が薄い)
   float stubble = uRough * (1.0 - tall) * (0.12 + 0.3 * smoothstep(0.4, 0.8, mowNoise(world.xz * 0.16 + 31.0) * 0.6 + nMid * 0.4));
   color = mix(color, vec3(0.200, 0.205, 0.085) * (0.8 + 0.4 * nMid), stubble);
-  color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
+  // 刈り込んだ芝は、きめが細かく揃って見える(ざらつきを抑える)
+  color *= 1.0 + (nFine - 0.5) * mix(0.14, 0.6, tall) * fineFade;
 
   // 色相のむら。数 m ごとの株のかたまりと、数十 m の広がりで、黄みと青みの間を揺らす。
   // 近くでは葉の 1 枚ごとにも少し変える
@@ -159,6 +168,18 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   color *= 1.0 + uStripe * mix(layPatch, 1.0, pressed * TRACK_STRENGTH) * dot(lean, toFrag.xz);
   // 刈った所にも、刈り方のむらによる濃淡を少し残す
   color *= 1.0 + (nMid - 0.5) * 0.16 * (1.0 - tall);
+  // 刈り込んだ芝のまだら。1〜3 m ほどの大きさで、少し黄みがかった所と濃い所が入り混じる
+  // (芝の葉の寝方のむらと同じ位置に出す)
+  float cutPatch = mowNoise(world.xz * 0.35 + 5.3) * 0.6 + mowNoise(world.xz * 0.9 + 17.1) * 0.4;
+  color *= 1.0 + (cutPatch - 0.5) * 0.24 * (1.0 - tall);
+  float cutTint = smoothstep(0.35, 0.75, mowNoise(world.xz * 0.5 + 41.3));
+  color = mix(color, color * mix(vec3(0.92, 1.0, 1.06), vec3(1.1, 1.04, 0.84), cutTint), 0.6 * (1.0 - tall));
+  // 刈った所には、日の当たらなかった根元の淡い黄緑が出る。刈る前に長かった所ほど淡い。
+  // 荒れ草地では強く、手入れされた芝では弱い。10〜30 cm の株ごとにむらをつける(葉 1 枚ごとだとざらつく)
+  float bleachClump = mowNoise(world.xz * 4.0 + 23.9);
+  float bleach = (1.0 - tall) * mix(0.18, 0.75, uRough) * (0.3 + 0.7 * lengthPatch)
+    * smoothstep(0.25, 0.85, bleachClump * 0.65 + cutPatch * 0.35);
+  color = mix(color, color * vec3(1.3, 1.24, 0.78) + vec3(0.018, 0.016, 0.0), bleach);
   // 進行方向に沿った細い筋(リールやローラーの当たりむら)
   float leanLength = length(lean);
   if (leanLength > 0.05) {
@@ -186,6 +207,7 @@ const FRAGMENT_COLOR = /* glsl */ `
 vec4 mowState = mowSample(vMowWorld.xz);
 vec2 mowLean = mowState.rg * 2.0 - 1.0;
 vec3 grassColor = mowGrassColor(vMowWorld, mowState, cameraPosition);
+float grassSheenAmount = grassSheen(mowState);
 // 芝の葉を描く範囲では、葉の根元の陰として地面を少し暗くする
 grassColor *= 1.0 - 0.22 * bladeCoverage(vMowWorld.xz);
 diffuseColor.rgb = grassColor;
@@ -199,7 +221,20 @@ diffuseColor.rgb = grassColor;
  */
 export const GRASS_SPECULAR = /* glsl */ `
 material.specularF90 = 0.04;
+#ifdef USE_SHEEN
+material.sheenColor *= grassSheenAmount;
+#endif
 `
+
+/**
+ * 芝のつや(シーン)の材質の値。地面と、近景の芝の葉で同じ値を使う。
+ * 場所ごとの強さは、シェーダーの grassSheen(刈った所ほど強い)で変える
+ */
+export const GRASS_SHEEN = {
+  sheen: 1,
+  sheenRoughness: 0.55,
+  sheenColor: new Color(0.21, 0.28, 0.09)
+}
 
 const FRAGMENT_NORMAL = /* glsl */ `
 // 倒れた芝の上面は、倒れた向きと逆側に傾く。太陽の向きによる明暗の差になる
@@ -210,7 +245,8 @@ vec3 mowTilt = vec3(-mowLean.x, 0.0, -mowLean.y) * uTilt
 // 葉の 1 枚 1 枚の向きのばらつきを、細かいノイズで法線に与える。太陽の反射がちらちらと散る
 float glintFade = 1.0 - smoothstep(6.0, 32.0, length(vMowWorld - cameraPosition));
 vec2 glintCell = vMowWorld.xz * 55.0;
-vec3 glint = vec3(mowNoise(glintCell) - 0.5, 0.0, mowNoise(glintCell + 31.7) - 0.5) * 0.9 * glintFade;
+vec3 glint = vec3(mowNoise(glintCell) - 0.5, 0.0, mowNoise(glintCell + 31.7) - 0.5) * 0.9 * glintFade
+  * mix(1.0, 0.35, 1.0 - smoothstep(0.02, 0.06, mowState.a * uMaxHeight)); // 刈り込んだ芝は、きらめきのざらつきを抑える
 normal = normalize(normal + (viewMatrix * vec4(mowTilt + glint, 0.0)).xyz);
 `
 
@@ -315,7 +351,7 @@ export function createGround(
     uSunDir: { value: new Vector3(0, 1, 0) }
   }
 
-  const material = new MeshStandardMaterial({ roughness: 0.6, metalness: 0 })
+  const material = new MeshPhysicalMaterial({ roughness: 0.6, metalness: 0, ...GRASS_SHEEN })
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.vertexShader = shader.vertexShader

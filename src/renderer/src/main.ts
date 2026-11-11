@@ -16,6 +16,7 @@ import { KeyboardInput } from './input'
 import { CAMERA_MODES, CAMERA_MODE_LABELS, CameraRig, ORBIT_LEVELS, type CameraMode } from './render/cameraRig'
 import { Clippings } from './render/clippings'
 import { GrassBlades } from './render/grassBlades'
+import { NormalPreview } from './render/normalPreview'
 import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
@@ -214,6 +215,13 @@ ground.uniforms.uSunDir.value = lighting.sunDirection
 // 近景の芝の葉。?blades=0 で描かない
 const grassBlades = new GrassBlades(terrain, ground.uniforms)
 const bladeSettings = { show: query.get('blades') !== '0' }
+// 動作確認用: 刈った地面の法線マップを、左上に 2D の画像で出す(起動時の指定 normals=1 でも出せる)
+const debugSettings = { normals: query.get('normals') === '1' }
+const normalPanel = byId('normal-panel')
+const normalPreview = new NormalPreview(ground.uniforms, byId<HTMLCanvasElement>('normal-canvas'))
+byId('normal-note').textContent = `機体のまわり ${normalPreview.span} m 四方。上がカメラの向き。赤は右、緑は上へ傾いた所`
+normalPanel.hidden = !debugSettings.normals
+let normalTimer = 0
 scene.add(grassBlades.mesh)
 
 // 刈りカスの粒
@@ -754,6 +762,28 @@ syncs.push(
       bladeSettings.show = v
     }
   ),
+  addCheck(
+    grassFields,
+    '法線マップを表示',
+    '動作確認用。刈った地面の法線マップを、機体のまわりを真上から見た画像として左上に出します。画像の右が赤、上が緑、地面に垂直な向きが青で、平らな所は青紫に見えます',
+    () => debugSettings.normals,
+    (v) => {
+      debugSettings.normals = v
+      normalPanel.hidden = !v
+    }
+  ),
+  addSlider(grassFields, {
+    label: '法線の強調',
+    title: '法線マップの傾きを何倍に強調して見せるか。刈った芝の傾きは小さく、1 倍では淡い色になります',
+    min: 1,
+    max: 10,
+    step: 1,
+    get: () => normalPreview.gain,
+    set: (v) => {
+      normalPreview.gain = v
+    },
+    format: (v) => `${v.toFixed(0)} 倍`
+  }),
   addSlider(grassFields, {
     label: '縞(視線)',
     title: '芝の倒れた向きと、見る向きの関係でつく明暗の強さ',
@@ -1522,6 +1552,11 @@ function frame(now: number): void {
   zoneOverlay.tick(dt)
   pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
   grassBlades.update(rig.camera, bladeSettings.show)
+  // 法線マップは、読み出しで描画が少し止まるので、0.2 秒ごとに描き直す
+  if (debugSettings.normals && (normalTimer -= dt) <= 0) {
+    normalTimer = 0.2
+    const view = rig.camera.getWorldDirection(scratch)
+    normalPreview.update(renderer, sim.state.x, sim.state.z, sim.state.heading, view.x, view.z)  }
   lighting.update(renderer, exposure, rig.camera.position)
   // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
   sunGizmo.update(

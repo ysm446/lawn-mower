@@ -11,7 +11,7 @@ import {
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   Mesh,
-  MeshStandardMaterial,
+  MeshPhysicalMaterial,
   NearestFilter,
   RedFormat,
   Vector2,
@@ -20,7 +20,7 @@ import {
 } from 'three'
 import type { Terrain } from '../sim/terrain'
 import { LENGTH_FACTOR_MAX, LENGTH_FACTOR_MIN } from '../sim/grassField'
-import { GRASS_GLSL, GRASS_SPECULAR, type GroundUniforms } from './ground'
+import { GRASS_GLSL, GRASS_SHEEN, GRASS_SPECULAR, type GroundUniforms } from './ground'
 
 export interface GrassBladeOptions {
   /** 葉を描く範囲の半径(m) */
@@ -233,9 +233,30 @@ float pressed = smoothstep(0.84, 0.97, leanAmount);
 pressed *= 0.5;
 laid = mix(laid * layPatch * (rndD < 0.22 ? 0.25 : 1.0), 1.0, pressed);
 layAngle = laid * mix(1.1 + 0.5 * (rndB - 0.5), 1.38, pressed);
-// 寝た葉は、刈高と同じ高さに収まる分だけ長く見える
 // 伸びた芝は長さがそのままで、寝た分だけ低くなる
-bladeLength = mix(bladeHeight, bladeHeight / max(cos(layAngle), 0.4), bladeCut);
+bladeLength = bladeHeight;
+
+// 刈った芝: 刈高ぴったりの切り株が立っているのではなく、刈高の 1.4〜2 倍の長さの葉が寝て重なり、
+// 地面を覆う(葉先の高さは刈高のあたりに収まる。葉先で鉛直から 35〜66°)。ビロードのような、きめの細かい面にする
+// 寝る向きは、刈った向きに揃えて少しだけばらつかせる(ばらつきが大きいと、葉が交差して編み目のように見える)。
+// 好きな向きに寝た葉もわずかに混じる
+vec2 stripeDir = leanDir;
+float matSpin = (leanAmount > 0.01 ? atan(leanDir.y, leanDir.x) : rndB * 6.2832) + (rndB - 0.5) * 0.7;
+if (rndD > 0.22 && rndD < 0.27) matSpin = fract(rndC * 13.7) * 6.2832;
+// 車輪に踏まれた所は、踏まれた向きに揃って寝る
+vec2 matDir = normalize(mix(vec2(cos(matSpin), sin(matSpin)), leanDir, pressed * 2.0));
+// 20 cm ほどの株のかたまりごとに、わずかに高さを変える(柔らかなふくらみ)
+float matTuft = bladeNoise(bladeRoot * 5.0 + 11.3);
+// 1〜3 m ほどの大きさで、葉がやや立った所と、よく寝た所が入り混じる(地面の色のまだらと同じ位置)
+float matPatch = bladeNoise(bladeRoot * 0.35 + 5.3) * 0.6 + bladeNoise(bladeRoot * 0.9 + 17.1) * 0.4;
+float matRise = bladeHeight * mix(0.82, 1.15, matTuft) * mix(0.85, 1.2, matPatch);
+float matLength = bladeHeight * mix(1.4, 2.0, fract(rndC * 7.31));
+float matAngle = mix(acos(clamp(matRise / max(matLength, 1e-4), 0.12, 0.95)), 1.4, pressed * 2.0);
+vec2 bladeDir = mix(leanDir, matDir, bladeCut);
+leanDir = dot(bladeDir, bladeDir) > 1e-6 ? normalize(bladeDir) : vec2(0.0);
+laid = mix(laid, 1.0, bladeCut);
+layAngle = mix(layAngle, matAngle, bladeCut);
+bladeLength = mix(bladeLength, matLength, bladeCut);
 
 // 地形の傾きから法線を求める。地面と同じ明るさで照らすため
 float slopeX = terrainHeight(bladeRoot + vec2(0.5, 0.0)) - terrainHeight(bladeRoot - vec2(0.5, 0.0));
@@ -251,8 +272,12 @@ vec3 bendTilt = vec3(bladeBend.x, 0.0, bladeBend.y) * position.y;
 vec3 freeNormal = terrainNormal * (0.7 + 0.5 * position.y)
   + faceNormal * 0.55 / mix(uBladeScale, uBladeScale * 2.0, uBladeBlend) - bendTilt * 0.5;
 // 寝た葉の表面は、倒れた向きと逆側へ傾いた上向きになる。縞の明暗はここから生まれる
-vec3 laidNormal = terrainNormal * (0.25 + sin(layAngle)) - vec3(leanDir.x, 0.0, leanDir.y) * cos(layAngle) * 0.8
-  + faceNormal * 0.2;
+// 刈った芝は、葉ごとの向きと角度ではなく、その場所の刈った向きと揃った角度で明るさを決める。
+// 葉が 1 枚ずつ違う明るさになると、面がざらついて見えるため(縞の明暗は、刈った向きから出る)
+vec2 shadeDir = mix(leanDir, stripeDir, bladeCut);
+float shadeAngle = mix(layAngle, mix(mix(1.05, 0.72, matPatch), 1.4, pressed * 2.0), bladeCut);
+vec3 laidNormal = terrainNormal * (0.25 + sin(shadeAngle)) - vec3(shadeDir.x, 0.0, shadeDir.y) * cos(shadeAngle) * 0.8
+  + faceNormal * mix(0.2, 0.05, bladeCut);
 objectNormal = normalize(mix(freeNormal, laidNormal, laid));
 }
 `
@@ -277,13 +302,19 @@ vBladeT = bladeT;
 const FRAGMENT_COLOR = /* glsl */ `
 vec4 bladeState = mowSample(vBladeRoot.xz);
 vec3 bladeColor = mowGrassColor(vBladeRoot, bladeState, cameraPosition);
-// 根元は陰になって暗く、先は光が透けて明るい
-bladeColor *= mix(0.62, 1.18, vBladeT);
+float grassSheenAmount = grassSheen(bladeState);
+// 根元は陰になって暗く、先は光が透けて明るい。
+// 刈った芝は葉が寝て重なり、根元の陰はほとんど見えない(暗い点がぽつぽつ見えないようにする)
+float bladeCutHere = 1.0 - smoothstep(0.02, 0.06, bladeState.a * uMaxHeight);
+bladeColor *= mix(mix(0.62, 0.86, bladeCutHere), mix(1.18, 1.08, bladeCutHere), vBladeT);
 // 荒れ草地: 伸びた草には、枯れ色の葉、穂、小さな花が混じる。刈ると無くなる
 float bladeTall = smoothstep(0.03, 0.08, bladeState.a * uMaxHeight) * uRough;
 float bladeKind = mowHash(floor(vBladeRoot.xz * 60.0) + 7.3);
 // 枯れ色の葉(先へ行くほど枯れている)
-bladeColor = mix(bladeColor, vec3(0.34, 0.30, 0.11), bladeTall * step(0.72, bladeKind) * (0.35 + 0.65 * vBladeT));
+// 刈っても、枯れた葉の下の部分は残る(少し弱く、葉の全体に出る)。穂と花は刈り取られて無くなる
+float bladeDry = bladeTall * step(0.72, bladeKind) * (0.35 + 0.65 * vBladeT)
+  + uRough * bladeCutHere * step(0.78, bladeKind) * 0.5;
+bladeColor = mix(bladeColor, vec3(0.34, 0.30, 0.11), bladeDry);
 // 穂(先だけが淡い色)
 bladeColor = mix(bladeColor, vec3(0.50, 0.45, 0.24), bladeTall * step(0.9, bladeKind) * smoothstep(0.7, 0.9, vBladeT));
 // 小さな花(白と黄)。先だけに付く
@@ -361,7 +392,7 @@ export class GrassBlades {
       uBladeWidth: { value: options.bladeWidth }
     }
 
-    const material = new MeshStandardMaterial({ roughness: 0.38, metalness: 0, side: DoubleSide })
+    const material = new MeshPhysicalMaterial({ roughness: 0.38, metalness: 0, side: DoubleSide, ...GRASS_SHEEN })
     material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, uniforms)
       shader.vertexShader = shader.vertexShader
@@ -382,8 +413,7 @@ export class GrassBlades {
         .replace(
           '#include <normal_fragment_begin>',
           '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL
-        )
-    }
+        )    }
 
     this.mesh = new Mesh(geometry, material)
     this.mesh.frustumCulled = false
