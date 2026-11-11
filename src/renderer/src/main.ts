@@ -990,7 +990,7 @@ syncs.push(
 syncs.push(
   addSlider(lightFields, {
     label: '風',
-    title: '木の枝と葉を揺らし、雲を流す風の強さ。0 で止まります',
+    title: '草をなびかせ(草の波)、木の枝と葉を揺らし、雲を流す風の強さ。0 で止まります',
     min: 0,
     max: 3,
     step: 0.1,
@@ -1973,6 +1973,9 @@ function frame(now: number): void {
   // タイムラプスでは木の揺れもコマごとに進める(1 コマごとに枝葉の形が変わり、ちらちらして見える)
   windTime = (windTime + (timeSettings.timelapse ? simSeconds : dt)) % 4096
   treeModels.update(windTime, windSettings.strength)
+  // 草の波も、木の揺れと同じ時刻と強さで動かす
+  ground.uniforms.uWindTime.value = windTime
+  ground.uniforms.uWindStrength.value = windSettings.strength
   // 後から読み込んだモデルの材質も、影の仕組みに対応させる
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
   pathLine.tick(dt)

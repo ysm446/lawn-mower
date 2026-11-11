@@ -80,6 +80,9 @@ uniform vec2 uBladeCenter;
 uniform float uBladeRadius;
 uniform float uBladeAmount;
 uniform float uRough;
+uniform float uWindTime;
+uniform float uWindStrength;
+uniform vec2 uWindDir;
 varying vec3 vBladeRoot;
 varying float vBladeT;
 
@@ -122,6 +125,17 @@ float bladeNoise(vec2 p) {
   float c = bladeHash(i + vec2(0.0, 1.0));
   float d = bladeHash(i + vec2(1.0, 1.0));
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 草の波(突風の帯)の強さ(0〜1)。地面の mowGust(ground.ts)と同じ式
+float bladeGust(vec2 xz) {
+  vec2 dir = uWindDir;
+  vec2 across = vec2(-dir.y, dir.x);
+  vec2 q = xz - dir * (2.5 + 1.5 * uWindStrength) * uWindTime;
+  float along = dot(q, dir);
+  float side = dot(q, across);
+  float n = bladeNoise(vec2(along / 7.0, side / 16.0)) * 0.65 + bladeNoise(vec2(along / 2.6, side / 6.0) + 5.1) * 0.35;
+  return smoothstep(0.38, 0.82, n);
 }
 
 // 地形の高さ。格子の 4 点から補間する(Terrain.heightAt と同じ計算)
@@ -219,6 +233,12 @@ bladeHeight *= mix(longVary, cutVary, bladeCut) * bladeFade;
 float wild = (1.0 - bladeCut) * (0.55 + 0.5 * uRough) + 0.08;
 float wildAngle = rndB * 6.2832;
 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
+// 風: いつも少し風下へなびき、突風の帯が来ると大きく倒れて、抜けると戻る(草の波)。
+// 1 枚ずつの小刻みな揺れも足す。刈った短い芝はほとんど揺れない。強い風でも倒れすぎないよう、強さは頭打ちにする
+float windAmount = 1.0 - exp(-uWindStrength * 0.8);
+float windGust = bladeGust(bladeRoot);
+float flutter = sin(uWindTime * (5.0 + 3.0 * rndA) + rndB * 6.2832) * (0.05 + 0.08 * windGust);
+bladeBend += uWindDir * windAmount * (0.15 + 0.75 * windGust + flutter) * mix(1.0, 0.2, bladeCut);
 
 // 刈った芝は、刈刃とローラーに押されて進行方向へ寝る。寝る角度(鉛直からの角度)を決める
 float leanAmount = length(bladeLean);

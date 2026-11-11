@@ -34,6 +34,12 @@ export interface GroundUniforms {
   uRough: { value: number }
   /** 太陽の向き(地面から太陽へ向かう単位ベクトル) */
   uSunDir: { value: Vector3 }
+  /** 風の時刻(秒)。草の波を流す */
+  uWindTime: { value: number }
+  /** 風の強さ(「光と風」パネルの「風」) */
+  uWindStrength: { value: number }
+  /** 風の吹いていく向き(水平面の単位ベクトル x, z。雲の流れる向きと同じ) */
+  uWindDir: { value: Vector2 }
   [name: string]: { value: unknown }
 }
 
@@ -65,6 +71,9 @@ uniform float uBladeRadius;
 uniform float uBladeAmount;
 uniform float uRough; // 荒れ具合(0 は手入れされた芝、1 は荒れ草地)
 uniform vec3 uSunDir; // 太陽の向き
+uniform float uWindTime;
+uniform float uWindStrength;
+uniform vec2 uWindDir;
 
 float mowHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -81,6 +90,18 @@ float mowNoise(vec2 p) {
   float c = mowHash(i + vec2(0.0, 1.0));
   float d = mowHash(i + vec2(1.0, 1.0));
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 草の波(突風の帯)の強さ(0〜1)。風下へ流れていく大きなまだらで、帯は風に直交する向きに長い。
+// 芝の葉(grassBlades.ts の bladeGust)と同じ式にして、葉のなびきと地面の明暗の位置を揃える
+float mowGust(vec2 xz) {
+  vec2 dir = uWindDir;
+  vec2 across = vec2(-dir.y, dir.x);
+  vec2 q = xz - dir * (2.5 + 1.5 * uWindStrength) * uWindTime;
+  float along = dot(q, dir);
+  float side = dot(q, across);
+  float n = mowNoise(vec2(along / 7.0, side / 16.0)) * 0.65 + mowNoise(vec2(along / 2.6, side / 6.0) + 5.1) * 0.35;
+  return smoothstep(0.38, 0.82, n);
 }
 
 // 芝状態マップを 1 か所読む。範囲の外は刈っていない芝として扱う
@@ -190,6 +211,12 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
     float streak = mowNoise(vec2(dot(world.xz, across) * 6.5, dot(world.xz, along) * 0.3));
     color *= 1.0 + (streak - 0.5) * 0.14 * (1.0 - tall) * min(leanLength, 1.0);
   }
+
+  // 草の波: 突風の帯が来た所は、伸びた草がなびいて葉の明るい面が見え、明るくなる。
+  // 風下を向いて見ると(草が見る人から遠ざかる向きに倒れるので)より明るい。刈った芝はほとんど変わらない
+  float windAmount = 1.0 - exp(-uWindStrength * 0.8);
+  float gust = mowGust(world.xz) * windAmount * mix(0.15, 1.0, tall);
+  color *= 1.0 + gust * (0.08 + 0.12 * dot(uWindDir, normalize(toFrag.xz + vec2(1e-5))));
 
   // 逆光: 葉は光を少し通すので、太陽に向かって見ると、黄みがかって明るく見える
   float backlit = pow(max(dot(toFrag, uSunDir), 0.0), 3.0);
@@ -350,7 +377,10 @@ export function createGround(
     uBladeRadius: { value: 1 },
     uBladeAmount: { value: 0 },
     uRough: { value: 0 },
-    uSunDir: { value: new Vector3(0, 1, 0) }
+    uSunDir: { value: new Vector3(0, 1, 0) },
+    uWindTime: { value: 0 },
+    uWindStrength: { value: 1 },
+    uWindDir: { value: new Vector2(0.82, 0.57).normalize() }
   }
 
   const material = new MeshPhysicalMaterial({ roughness: 0.6, metalness: 0, ...GRASS_SHEEN })
