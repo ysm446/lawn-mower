@@ -5,11 +5,17 @@ import {
   BoxGeometry,
   CylinderGeometry,
   Group,
+  Matrix4,
   Mesh,
   MeshStandardMaterial,
+  Vector3,
   type Object3D
 } from 'three'
+import type { Terrain } from '../sim/terrain'
 import type { VehicleParams, VehicleState } from '../sim/vehicle'
+
+const WHEEL_RADIUS = 0.32
+const TRACK = 1.3
 
 export class MowerModel {
   readonly root = new Group()
@@ -18,15 +24,19 @@ export class MowerModel {
   private readonly allWheels: Mesh[] = []
   private readonly reels: Mesh[] = []
   private deckLift = 0
+  private readonly left = new Vector3()
+  private readonly up = new Vector3()
+  private readonly forward = new Vector3()
+  private readonly basis = new Matrix4()
 
-  constructor(params: VehicleParams) {
+  constructor(private readonly params: VehicleParams) {
     const bodyMat = new MeshStandardMaterial({ color: 0xb3261e, roughness: 0.45, metalness: 0.1 })
     const darkMat = new MeshStandardMaterial({ color: 0x1b1b1d, roughness: 0.8 })
     const metalMat = new MeshStandardMaterial({ color: 0x8d9094, roughness: 0.35, metalness: 0.8 })
     const seatMat = new MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.9 })
 
-    const wheelRadius = 0.32
-    const track = 1.3
+    const wheelRadius = WHEEL_RADIUS
+    const track = TRACK
 
     const body = new Mesh(new BoxGeometry(1.15, 0.55, 2.1), bodyMat)
     body.position.set(0, 0.72, 0.65)
@@ -89,18 +99,50 @@ export class MowerModel {
     })
   }
 
-  /** 車両の状態を見た目に反映する。dt は見た目の補間に使う */
-  sync(state: VehicleState, dt: number): void {
-    this.root.position.set(state.x, 0, state.z)
-    this.root.rotation.y = state.heading
+  /**
+   * 車両の状態を見た目に反映する。4 輪の接地点の高さから、機体の高さと傾きを決める。
+   * dt は見た目の補間に使う
+   */
+  sync(state: VehicleState, dt: number, terrain: Terrain): void {
+    const { wheelbase, deckOffset } = this.params
+    const fx = Math.sin(state.heading)
+    const fz = Math.cos(state.heading)
+    // 進行方向の左
+    const lx = fz
+    const lz = -fx
+    const half = TRACK / 2
+    const frontX = state.x + fx * wheelbase
+    const frontZ = state.z + fz * wheelbase
+    const rearLeft = terrain.heightAt(state.x + lx * half, state.z + lz * half)
+    const rearRight = terrain.heightAt(state.x - lx * half, state.z - lz * half)
+    const frontLeft = terrain.heightAt(frontX + lx * half, frontZ + lz * half)
+    const frontRight = terrain.heightAt(frontX - lx * half, frontZ - lz * half)
+    const rear = (rearLeft + rearRight) / 2
+    const front = (frontLeft + frontRight) / 2
+
+    this.forward.set(fx * wheelbase, front - rear, fz * wheelbase).normalize()
+    this.left
+      .set(lx * TRACK, (rearLeft + frontLeft - rearRight - frontRight) / 2, lz * TRACK)
+      .normalize()
+    this.up.crossVectors(this.forward, this.left).normalize()
+    this.left.crossVectors(this.up, this.forward)
+    this.basis.makeBasis(this.left, this.up, this.forward)
+    this.root.quaternion.setFromRotationMatrix(this.basis)
+    this.root.position.set(state.x, rear, state.z)
+
     for (const pivot of this.frontWheels) pivot.rotation.y = state.steer
 
-    const spin = (state.speed * dt) / 0.32
+    const spin = (state.speed * dt) / WHEEL_RADIUS
     for (const w of this.allWheels) w.rotation.x += spin
+
+    // 刈刃は機体の前に張り出しているので、その位置の地面の高さに合わせて浮き沈みさせる
+    const deckGround = terrain.heightAt(state.x + fx * deckOffset, state.z + fz * deckOffset)
+    const deckPlane = rear + ((front - rear) * deckOffset) / wheelbase
+    const follow = Math.min(Math.max(deckGround - deckPlane, -0.3), 0.3)
 
     const targetLift = state.deckDown ? 0 : 1
     this.deckLift += (targetLift - this.deckLift) * Math.min(1, dt * 6)
-    this.deck.position.y = this.deckLift * 0.25
+    this.deck.position.y = this.deckLift * 0.25 + follow
     this.deck.rotation.x = -this.deckLift * 0.15
     if (state.deckDown) {
       for (const r of this.reels) r.rotation.x += dt * 30

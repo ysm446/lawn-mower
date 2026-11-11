@@ -21,6 +21,16 @@ describe('stepVehicle', () => {
     expect(s.heading).toBeCloseTo(0, 6)
   })
 
+  it('斜面では、水平方向に進む距離が傾きの分だけ短くなる', () => {
+    const flat = createVehicleState()
+    const slope = createVehicleState()
+    for (let i = 0; i < 120 * 10; i++) {
+      stepVehicle(flat, { throttle: 1, steer: 0 }, FAIRWAY_MOWER, DT)
+      stepVehicle(slope, { throttle: 1, steer: 0 }, FAIRWAY_MOWER, DT, Math.tan(Math.PI / 6))
+    }
+    expect(slope.z / flat.z).toBeCloseTo(Math.cos(Math.PI / 6), 6)
+  })
+
   it('左いっぱいに切ると、最小旋回半径の円を左回りに描く', () => {
     const s = createVehicleState()
     let maxX = 0

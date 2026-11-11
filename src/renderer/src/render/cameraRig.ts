@@ -7,7 +7,11 @@ import {
   exposureFromSettings,
   type CameraSettings
 } from '../camera/exposure'
+import type { Terrain } from '../sim/terrain'
 import type { VehicleState } from '../sim/vehicle'
+
+/** カメラが地面に潜らないように保つ、地面からの最低の高さ(m) */
+const MIN_CLEARANCE = 1.2
 
 export type CameraMode = 'chase' | 'orbit' | 'top'
 
@@ -67,20 +71,24 @@ export class CameraRig {
     this.camera.aspect = aspect
   }
 
-  update(state: VehicleState, dt: number): void {
+  update(state: VehicleState, dt: number, terrain: Terrain): void {
     const cam = this.camera
     cam.filmGauge = this.settings.sensorWidth
     cam.setFocalLength(this.settings.focalLength)
 
     const fx = Math.sin(state.heading)
     const fz = Math.cos(state.heading)
-    this.focus.set(state.x + fx * 1.2, 0.8, state.z + fz * 1.2)
+    const ground = terrain.heightAt(state.x, state.z)
+    this.focus.set(state.x + fx * 1.2, ground + 0.8, state.z + fz * 1.2)
 
     if (this.mode === 'chase') {
-      this.tmp.set(state.x - fx * 9, 4.2, state.z - fz * 9)
+      this.tmp.set(state.x - fx * 9, ground + 4.2, state.z - fz * 9)
       if (this.initialized) cam.position.lerp(this.tmp, Math.min(1, dt * 3))
       else cam.position.copy(this.tmp)
-      cam.lookAt(state.x + fx * 4, 0.6, state.z + fz * 4)
+      this.keepAboveGround(terrain)
+      const aheadX = state.x + fx * 4
+      const aheadZ = state.z + fz * 4
+      cam.lookAt(aheadX, terrain.heightAt(aheadX, aheadZ) + 0.6, aheadZ)
     } else if (this.mode === 'orbit') {
       if (!this.initialized) {
         cam.position.set(this.focus.x - 38, 26, this.focus.z - 46)
@@ -92,8 +100,9 @@ export class CameraRig {
         this.controls.target.add(this.tmp)
       }
       this.controls.update()
+      this.keepAboveGround(terrain)
     } else {
-      this.tmp.set(this.focus.x - 60, 150, this.focus.z - 110)
+      this.tmp.set(this.focus.x - 60, this.focus.y + 150, this.focus.z - 110)
       if (this.initialized) cam.position.lerp(this.tmp, Math.min(1, dt * 2))
       else cam.position.copy(this.tmp)
       cam.lookAt(this.focus)
@@ -101,6 +110,12 @@ export class CameraRig {
 
     this.lastFocus.copy(this.focus)
     this.initialized = true
+  }
+
+  private keepAboveGround(terrain: Terrain): void {
+    const p = this.camera.position
+    const floor = terrain.heightAt(p.x, p.z) + MIN_CLEARANCE
+    if (p.y < floor) p.y = floor
   }
 
   get focusPoint(): Vector3 {

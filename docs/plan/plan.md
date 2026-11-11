@@ -1,7 +1,7 @@
 # plan — 実装方針と優先順位
 
 作成日時: 2026-11-11 04:54
-更新日時: 2026-11-11 05:19
+更新日時: 2026-11-11 11:29
 
 目的は [goals.md](goals.md)、構想の詳細と選択肢は [docs/reference/concept.md](../reference/concept.md) を参照。
 
@@ -29,7 +29,7 @@
 
 ## マイルストーン
 
-M0 と M1 は完了。現在の状況は [progress.md](progress.md) を参照。
+M0 から M3 は完了。現在の状況は [progress.md](progress.md) を参照。
 
 | 段階 | 内容 | 完了の目安 |
 | --- | --- | --- |

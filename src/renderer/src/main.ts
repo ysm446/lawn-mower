@@ -16,9 +16,19 @@ import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
 import { MowerModel } from './render/mowerModel'
+import { ZoneOverlay } from './render/zoneOverlay'
 import { ev100 } from './camera/exposure'
 import { CoverageGrid } from './sim/coverage'
 import { LineDriver } from './sim/lineDriver'
+import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
+import {
+  DEFAULT_ZONING,
+  ZONE_NONE,
+  ZONE_RIDE,
+  ZONE_SLOPE,
+  computeZoning,
+  type ZoningResult
+} from './sim/zoning'
 import {
   FAIRWAY_MOWER,
   createVehicleState,
@@ -31,12 +41,15 @@ import { addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sy
 // 単位はすべて実寸(1 = 1 m)
 const FIELD_SIZE = 256
 const FIELD_ORIGIN = -FIELD_SIZE / 2
-const GROUND_EXTENT = 5000
+const GROUND_EXTENT = 7000
 const MAX_GRASS_HEIGHT = 0.2
 const UNCUT_HEIGHT = 0.07
 const SIM_DT = 1 / 120
 const MAX_STEPS_PER_FRAME = 600
 const TIME_SCALES = [1, 2, 4, 8, 16]
+// 芝刈り機の出発点
+const START_X = -21
+const START_Z = -55
 
 const F_STOPS = [
   1.4, 1.6, 1.8, 2, 2.2, 2.5, 2.8, 3.2, 3.5, 4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9, 10, 11, 13, 14, 16, 18,
@@ -74,8 +87,48 @@ const mowMap = new MowMap(renderer, {
 })
 mowMap.reset(UNCUT_HEIGHT)
 
-const ground = createGround(mowMap, GROUND_EXTENT, UNCUT_HEIGHT)
+// 地形のシード値は ?seed= で変えられる
+const querySeed = Number(query.get('seed'))
+const terrain = new Terrain({
+  ...DEFAULT_TERRAIN,
+  seed: Number.isInteger(querySeed) && querySeed > 0 ? querySeed : DEFAULT_TERRAIN.seed
+})
+
+const zoneOverlay = new ZoneOverlay(terrain)
+scene.add(zoneOverlay.lines)
+
+const ground = createGround(mowMap, terrain, zoneOverlay.texture, GROUND_EXTENT, UNCUT_HEIGHT)
 scene.add(ground.mesh)
+
+// 勾配による区分け。設定を変えたら次のフレームで計算し直す
+const zoning = {
+  options: { ...DEFAULT_ZONING },
+  show: query.get('zones') === '1',
+  dirty: true,
+  result: null as ZoningResult | null
+}
+
+function updateZoning(): void {
+  zoning.dirty = false
+  const result = computeZoning(
+    { samples: terrain.samples, cell: terrain.options.cell, heights: terrain.heights },
+    zoning.options,
+    (START_X - terrain.origin) / terrain.options.cell,
+    (START_Z - terrain.origin) / terrain.options.cell
+  )
+  zoning.result = result
+  zoneOverlay.update(result)
+  const total = result.zoneArea.reduce((a, b) => a + b)
+  const area = (m2: number): string =>
+    `${(m2 / 10000).toFixed(2)} ha(${((m2 / total) * 100).toFixed(0)}%)`
+  setZoneReadout({
+    ride: area(result.zoneArea[ZONE_RIDE]),
+    reachable: area(result.reachableArea),
+    slope: area(result.zoneArea[ZONE_SLOPE]),
+    none: area(result.zoneArea[ZONE_NONE]),
+    regions: `${result.regions.length}`
+  })
+}
 
 const params = FAIRWAY_MOWER
 const mower = new MowerModel(params)
@@ -92,7 +145,7 @@ composer.addPass(new RenderPass(scene, rig.camera))
 composer.addPass(new OutputPass())
 
 const sim = {
-  state: createVehicleState(-21, -55, 0),
+  state: createVehicleState(START_X, START_Z, 0),
   timeScale: 1,
   cutHeightMm: 18,
   autoDrive: false,
@@ -105,13 +158,13 @@ let accumulator = 0
 
 function createDriver(): LineDriver {
   return new LineDriver(
-    { startX: -21, spacing: 2.8, lines: 16, zMin: -40, zMax: 40, headland: 10 },
+    { startX: START_X, spacing: 2.8, lines: 16, zMin: -40, zMax: 40, headland: 10 },
     params
   )
 }
 
 function resetAll(): void {
-  sim.state = createVehicleState(-21, -55, 0)
+  sim.state = createVehicleState(START_X, START_Z, 0)
   sim.elapsed = 0
   sim.distance = 0
   driver = createDriver()
@@ -121,7 +174,7 @@ function resetAll(): void {
   mowMap.reset(UNCUT_HEIGHT)
 }
 
-// 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1
+// 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1
 if (query.get('auto') === '1') sim.autoDrive = true
 const queryScale = Number(query.get('timescale'))
 if (queryScale > 0) sim.timeScale = queryScale
@@ -139,6 +192,8 @@ const setStatus = addReadout(byId('status-readout'), {
   speed: '速度',
   deck: '刈刃',
   area: '刈った面積',
+  slope: '勾配',
+  altitude: '標高',
   distance: '走行距離',
   elapsed: '経過時間'
 })
@@ -283,6 +338,67 @@ syncs.push(
   })
 )
 
+const setZoneReadout = addReadout(byId('zone-readout'), {
+  ride: '乗用機',
+  reachable: 'うち届く範囲',
+  slope: '斜面用機',
+  none: '刈らない',
+  regions: '領域の数'
+})
+const zoneFields = byId('zone-fields')
+const zoneSlider = (
+  label: string,
+  title: string,
+  key: keyof typeof zoning.options,
+  min: number,
+  max: number,
+  step: number,
+  unit: string
+): Sync =>
+  addSlider(zoneFields, {
+    label,
+    title,
+    min,
+    max,
+    step,
+    get: () => zoning.options[key],
+    set: (v) => {
+      zoning.options[key] = v
+      // 乗用機の上限が斜面用機の上限を超えないようにする
+      if (key === 'rideMaxDeg' && v > zoning.options.slopeMaxDeg) zoning.options.slopeMaxDeg = v
+      if (key === 'slopeMaxDeg' && v < zoning.options.rideMaxDeg) zoning.options.rideMaxDeg = v
+      zoning.dirty = true
+      syncUi()
+    },
+    format: (v) => `${v.toFixed(step < 1 ? 1 : 0)}${unit}`
+  })
+function setZoneShow(on: boolean): void {
+  zoning.show = on
+  syncUi()
+}
+syncs.push(
+  addSwitch(
+    byId('zone-switch'),
+    [
+      { value: false, label: '隠す', title: '区分けを表示しない(Z)' },
+      { value: true, label: '表示', title: '区分けを色と輪郭線で表示する(Z)' }
+    ],
+    () => zoning.show,
+    setZoneShow
+  ),
+  () => {
+    ground.uniforms.uZoneOverlay.value = zoning.show ? 1 : 0
+    zoneOverlay.visible = zoning.show
+  },
+  zoneSlider('乗用機の上限', '乗用の芝刈り機で刈る勾配の上限', 'rideMaxDeg', 5, 30, 1, '°'),
+  zoneSlider('斜面用機の上限', '斜面用の機種で刈る勾配の上限。これより急な所は刈らない', 'slopeMaxDeg', 10, 45, 1, '°'),
+  zoneSlider('境目の幅', '閾値の前後に取る幅。大きいほど境目の細かな出入りが減る', 'hysteresisDeg', 0, 5, 0.5, '°'),
+  zoneSlider('ならし', '勾配を求める前に地形をならす半径。細かな凹凸を無視する', 'smoothRadius', 0, 8, 1, ' m'),
+  zoneSlider('整形', '周りの多数派に合わせて形を整える半径', 'majorityRadius', 0, 8, 1, ' m'),
+  zoneSlider('最小の面積', 'これより狭い領域は周りの区分に吸収する', 'minArea', 0, 1000, 25, ' m²')
+)
+if (zoning.show) byId<HTMLDetailsElement>('zone-panel').open = true
+
 syncs.push(
   addSwitch(
     byId('speed-switch'),
@@ -356,7 +472,8 @@ const toggleHelp = setupHelp([
     items: [
       { keys: ['1', '〜', '5'], text: '倍速(1、2、4、8、16 倍)' },
       { keys: ['P'], text: '自動運転(仮)の開始と停止' },
-      { keys: ['R'], text: 'やり直し(芝を元に戻す)' }
+      { keys: ['R'], text: 'やり直し(芝を元に戻す)' },
+      { keys: ['Z'], text: '勾配による区分けの表示と非表示' }
     ]
   },
   {
@@ -376,6 +493,7 @@ input.onPress('KeyC', () => {
 })
 input.onPress('KeyP', () => setAutoDrive(!sim.autoDrive))
 input.onPress('KeyR', resetAll)
+input.onPress('KeyZ', () => setZoneShow(!zoning.show))
 input.onPress('Slash', toggleHelp)
 TIME_SCALES.forEach((scale, i) => {
   input.onPress(`Digit${i + 1}`, () => {
@@ -396,7 +514,8 @@ function stepSimulation(): void {
     state.deckDown = out.deckDown
   }
 
-  stepVehicle(state, vehicleInput, params, SIM_DT)
+  const grade = terrain.gradeAlong(state.x, state.z, state.heading, params.wheelbase)
+  stepVehicle(state, vehicleInput, params, SIM_DT, grade)
   sim.elapsed += SIM_DT
   sim.distance += Math.abs(state.speed) * SIM_DT
 
@@ -447,6 +566,8 @@ function updateReadouts(dt: number): void {
     speed: `${(sim.state.speed * 3.6).toFixed(1)} km/h`,
     deck: sim.state.deckDown ? '下げ' : '上げ',
     area: `${coverage.coveredArea.toFixed(0)} m²`,
+    slope: `${((terrain.slopeAt(sim.state.x, sim.state.z, 2) * 180) / Math.PI).toFixed(0)}°`,
+    altitude: `${terrain.heightAt(sim.state.x, sim.state.z).toFixed(1)} m`,
     distance: `${sim.distance.toFixed(0)} m`,
     elapsed: formatTime(sim.elapsed)
   })
@@ -472,9 +593,10 @@ function frame(now: number): void {
   }
   if (steps === MAX_STEPS_PER_FRAME) accumulator = 0
   mowMap.flush()
+  if (zoning.dirty) updateZoning()
 
-  mower.sync(sim.state, dt * sim.timeScale)
-  rig.update(sim.state, dt)
+  mower.sync(sim.state, dt * sim.timeScale, terrain)
+  rig.update(sim.state, dt, terrain)
   lighting.update(rig.exposure, rig.focusPoint, rig.camera.position)
   composer.render()
   updateReadouts(dt)

@@ -76,12 +76,17 @@ export function minTurnRadius(params: VehicleParams): number {
   return params.wheelbase / Math.tan(params.maxSteer)
 }
 
-/** 状態を dt 秒だけ進める(state を書き換える) */
+/**
+ * 状態を dt 秒だけ進める(state を書き換える)。
+ * grade は進行方向の地面の傾き(高さ / 水平距離)。速度は地面に沿った速さなので、
+ * 斜面では水平方向に進む距離がその分だけ短くなる。
+ */
 export function stepVehicle(
   state: VehicleState,
   input: VehicleInput,
   params: VehicleParams,
-  dt: number
+  dt: number,
+  grade = 0
 ): void {
   const throttle = clamp(input.throttle, -1, 1)
   const targetSpeed = throttle >= 0 ? throttle * params.maxSpeed : throttle * params.maxReverseSpeed
@@ -92,9 +97,10 @@ export function stepVehicle(
   const targetSteer = clamp(input.steer, -1, 1) * params.maxSteer
   state.steer = approach(state.steer, targetSteer, params.steerRate * dt)
 
-  state.x += Math.sin(state.heading) * state.speed * dt
-  state.z += Math.cos(state.heading) * state.speed * dt
-  state.heading += (state.speed / params.wheelbase) * Math.tan(state.steer) * dt
+  const travel = (state.speed * dt) / Math.sqrt(1 + grade * grade)
+  state.x += Math.sin(state.heading) * travel
+  state.z += Math.cos(state.heading) * travel
+  state.heading += (travel / params.wheelbase) * Math.tan(state.steer)
 }
 
 /** 刈刃の左右端の位置 */
