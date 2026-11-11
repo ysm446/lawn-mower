@@ -48,7 +48,7 @@ export interface Ground {
  */
 export const GRASS_GLSL = /* glsl */ `
 // 車輪の跡の強さ(0 で刈っただけの所と同じ、1 で最も強い)。地面と芝の葉で同じ値を使う
-#define TRACK_STRENGTH 0.5
+#define TRACK_STRENGTH 0.3
 uniform sampler2D uMowMap;
 uniform vec2 uMowOrigin;
 uniform float uMowSize;
