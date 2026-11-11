@@ -53,6 +53,11 @@ export interface LightingSettings {
   haze: number
   /** 雲の量(0 で快晴、1 でほぼ曇り) */
   cloudCover: number
+  /**
+   * スカイライト強度。空からの光(地面や機体が受ける環境光と、雲が受ける空の光)に掛ける倍率。
+   * 1 は大気の計算どおりで、それ以外は照明のバランスの補正。terrain-graph の skylightIntensity に合わせる(0〜8)
+   */
+  skylightIntensity: number
 }
 
 export const DEFAULT_LIGHTING: LightingSettings = {
@@ -60,7 +65,8 @@ export const DEFAULT_LIGHTING: LightingSettings = {
   sunAzimuth: 125,
   sunIlluminance: SOLAR_ILLUMINANCE,
   haze: 3,
-  cloudCover: 0.35
+  cloudCover: 0.35,
+  skylightIntensity: 1
 }
 
 // 雲の濃さ。空に見える雲と、地面に落ちる雲の影で同じものを使うので、雲と影の位置が合う
@@ -292,13 +298,13 @@ export class Lighting {
       )
       .multiply(GROUND_ALBEDO)
       .multiplyScalar(1 / skyStrongest)
-    this.hemisphere.intensity = s.sunIlluminance * skyStrongest * exposure
+    this.hemisphere.intensity = s.sunIlluminance * skyStrongest * exposure * s.skylightIntensity
 
     // 雲の明るい側の輝度。太陽の光と、空からの光を受けて白く光る
     this.cloudLit
       .copy(this.sunColor)
       .multiplyScalar(sunIlluminance * 0.117)
-      .add(_color.setRGB(sky.x, sky.y, sky.z).multiplyScalar(s.sunIlluminance * 0.1))
+      .add(_color.setRGB(sky.x, sky.y, sky.z).multiplyScalar(s.sunIlluminance * 0.1 * s.skylightIntensity))
 
     // 霞の濃さ。地表での散乱の係数に、遠近感を出すための倍率を掛ける
     const mie = MIE_BETA * s.haze * MIE_EXTINCTION

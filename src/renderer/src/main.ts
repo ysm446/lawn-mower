@@ -166,6 +166,9 @@ if (querySunElevation > 0) {
 }
 const queryClouds = query.get('clouds')
 if (queryClouds !== null) lighting.settings.cloudCover = Number(queryClouds)
+// スカイライト強度(動作確認用)
+const querySkylight = query.get('skylight')
+if (querySkylight !== null) lighting.settings.skylightIntensity = Number(querySkylight)
 function setTimelapse(on: boolean): void {
   timeSettings.timelapse = on
   // 等倍のままでは、ただ動きが粗くなるだけなので、倍速を上げる
@@ -801,6 +804,19 @@ syncs.push(
     get: () => lighting.settings.haze,
     set: (v) => {
       lighting.settings.haze = v
+    },
+    format: (v) => v.toFixed(1)
+  }),
+  addSlider(lightFields, {
+    label: 'スカイライト',
+    title:
+      'スカイライト強度。空からの光(影の中や太陽の当たらない面を照らす光と、雲が受ける空の光)の倍率です。1 が大気の計算どおり。上げると影が明るく青みがかり、下げると影が暗く締まります',
+    min: 0,
+    max: 8,
+    step: 0.1,
+    get: () => lighting.settings.skylightIntensity,
+    set: (v) => {
+      lighting.settings.skylightIntensity = v
     },
     format: (v) => v.toFixed(1)
   })
