@@ -24,6 +24,7 @@ import { overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
 import { Trees } from './render/trees'
 import { DofPass, MeterPass } from './render/postfx'
+import { PlotOverlay } from './render/plotOverlay'
 import { ZoneOverlay } from './render/zoneOverlay'
 import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposure'
 import { CoverageGrid } from './sim/coverage'
@@ -33,6 +34,7 @@ import { GrassField } from './sim/grassField'
 import { loadSettings, setupSettings, type AppSettings } from './settings'
 import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
+import { DEFAULT_PLOTS, clusterPlots, type PlotResult } from './sim/plots'
 import { advanceHour, daylightHours, formatHour, sunAngles } from './sim/sunPath'
 import { blockedByTrees, generateTrees } from './sim/trees'
 import {
@@ -168,6 +170,13 @@ const timeSettings = {
   /** 太陽を時刻に合わせて動かすか。太陽を手で動かすとオフになる */
   sunFollowsClock: true
 }
+// 太陽の向きを直接決める(動作確認用)。時刻では動かさなくなる
+const querySunElevation = Number(query.get('sunel'))
+if (querySunElevation > 0) {
+  lighting.settings.sunElevation = querySunElevation
+  lighting.settings.sunAzimuth = Number(query.get('sunaz') ?? 0)
+  timeSettings.sunFollowsClock = false
+}
 const queryClouds = query.get('clouds')
 if (queryClouds !== null) lighting.settings.cloudCover = Number(queryClouds)
 function setTimelapse(on: boolean): void {
@@ -179,6 +188,8 @@ function setTimelapse(on: boolean): void {
 
 const zoneOverlay = new ZoneOverlay(terrain)
 scene.add(zoneOverlay.lines)
+const plotOverlay = new PlotOverlay(terrain)
+scene.add(plotOverlay.lines)
 
 // 刈る前の芝の長さのむら(場所ごとの倍率)
 const grassField = new GrassField({
@@ -196,6 +207,8 @@ const ground = createGround(
 )
 scene.add(ground.mesh)
 ground.uniforms.uRough.value = map.grass.roughness
+// 太陽の向きは、光の設定と同じものを見る(逆光のときの芝の色に使う)
+ground.uniforms.uSunDir.value = lighting.sunDirection
 
 // 近景の芝の葉。?blades=0 で描かない
 const grassBlades = new GrassBlades(terrain, ground.uniforms)
@@ -230,6 +243,7 @@ function updateZoning(): void {
     blocked
   )
   zoning.result = result
+  plotting.dirty = true
   route.dirty = true
   zoneOverlay.update(result, blocked)
   const total = result.zoneArea.reduce((a, b) => a + b)
@@ -242,6 +256,87 @@ function updateZoning(): void {
     none: area(result.zoneArea[ZONE_NONE]),
     regions: `${result.regions.length}`
   })
+}
+
+// 区画分け。乗用機で刈れて届く範囲を、地形の特徴でいくつかの区画に分ける。自動運転は区画ごとに刈る
+const plotting = {
+  options: { ...DEFAULT_PLOTS, targetArea: map.plotArea },
+  dirty: true,
+  result: null as PlotResult | null,
+  /** 乗用機で刈れて、出発点から届く範囲(1)。区画をまたぐ移動で通ってよい所 */
+  reach: null as Uint8Array | null,
+  /** 今刈る区画の番号 */
+  current: 0,
+  /** 刈り終えた区画 */
+  done: new Set<number>(),
+  /** 1 つ刈り終えたら、続けて次の区画へ進むか */
+  sequence: true
+}
+
+function updatePlots(): void {
+  if (zoning.dirty || !zoning.result) updateZoning()
+  plotting.dirty = false
+  const zones = zoning.result as ZoningResult
+  const n = zones.samples
+  const cell = terrain.options.cell
+  const reach = new Uint8Array(n * n)
+  for (let i = 0; i < reach.length; i++) reach[i] = zones.regions[zones.labels[i]].reachable ? 1 : 0
+  const result = clusterPlots(
+    reach,
+    terrain.heights,
+    n,
+    cell,
+    plotting.options,
+    (START_X - terrain.origin) / cell,
+    (START_Z - terrain.origin) / cell
+  )
+  plotting.reach = reach
+  plotting.result = result
+  plotting.done.clear()
+  // 機体のいる区画から始める
+  plotting.current = Math.max(plotAt(sim.state.x, sim.state.z), 0)
+  plotOverlay.update(result)
+  plotOverlay.setState(plotting.current, plotting.done)
+  route.dirty = true
+}
+
+/** その地点の区画の番号。区画の外なら -1 */
+function plotAt(x: number, z: number): number {
+  const result = plotting.result
+  if (!result) return -1
+  const n = result.samples
+  const ix = Math.round((x - terrain.origin) / terrain.options.cell)
+  const iz = Math.round((z - terrain.origin) / terrain.options.cell)
+  if (ix < 0 || iz < 0 || ix >= n || iz >= n) return -1
+  return result.labels[iz * n + ix]
+}
+
+/** 刈る区画を選ぶ。自動運転は止めずに、今いる所からその区画へ向かう経路を作り直す */
+function selectPlot(id: number): void {
+  const count = plotting.result?.plots.length ?? 0
+  if (count === 0) return
+  plotting.current = ((id % count) + count) % count
+  plotOverlay.setState(plotting.current, plotting.done)
+  route.dirty = true
+  route.follower = null
+  syncUi()
+}
+
+/** 今の区画を刈り終えたとき。続けて進む設定なら、まだ刈っていない次の区画へ移る */
+function finishPlot(): void {
+  const count = plotting.result?.plots.length ?? 0
+  plotting.done.add(plotting.current)
+  let next = -1
+  for (let step = 1; step < count && next < 0; step++) {
+    const id = (plotting.current + step) % count
+    if (!plotting.done.has(id)) next = id
+  }
+  if (plotting.sequence && next >= 0) {
+    selectPlot(next)
+    return
+  }
+  plotOverlay.setState(plotting.current, plotting.done)
+  setAutoDrive(false)
 }
 
 const params = FAIRWAY_MOWER
@@ -287,46 +382,34 @@ let tracksStarted = false
 // 自動運転の経路。区分けや設定が変わったら、必要になった時点で作り直す
 const route = {
   options: { angleDeg: 0, overlap: 0.2, headlandPasses: 3 },
-  // 刈る範囲の一辺(m)。出発点を中心とする正方形に絞る。FIELD_SIZE 以上なら絞らない
-  extent: map.routeExtent,
   show: query.get('path') === '1',
   dirty: true,
   plan: null as CoveragePlan | null,
   follower: null as PathFollower | null,
-  text: { area: '-', lines: '-', cut: '-', transit: '-', time: '-' }
+  text: { plot: '-', area: '-', lines: '-', cut: '-', transit: '-', time: '-' }
 }
 const pathLine = new PathLine(terrain)
 scene.add(pathLine.lines)
 
 const formatKm = (m: number): string => `${(m / 1000).toFixed(2)} km`
 
-/** 今いる所を出発点として、乗用機で刈れて届く範囲の経路を作る */
+/** 今いる所を出発点として、今刈る区画の経路を作る */
 function updateRoute(): void {
-  if (zoning.dirty || !zoning.result) updateZoning()
+  if (zoning.dirty || !zoning.result || plotting.dirty || !plotting.result) updatePlots()
   route.dirty = false
-  const result = zoning.result as ZoningResult
-  const n = result.samples
+  const plots = plotting.result as PlotResult
   const cell = terrain.options.cell
-  const startIx = Math.round((START_X - terrain.origin) / cell)
-  const startIz = Math.round((START_Z - terrain.origin) / cell)
-  const half = route.extent >= FIELD_SIZE ? Infinity : route.extent / 2 / cell
-  // 出発点から、届く範囲と正方形の両方に入る所だけをたどって広げる
-  const mask = new Uint8Array(n * n)
-  const stack = [startIz * n + startIx]
-  while (stack.length > 0) {
-    const i = stack.pop() as number
-    if (mask[i] === 1 || !result.regions[result.labels[i]].reachable) continue
-    const ix = i % n
-    const iz = (i - ix) / n
-    if (Math.abs(ix - startIx) > half || Math.abs(iz - startIz) > half) continue
-    mask[i] = 1
-    if (ix > 0) stack.push(i - 1)
-    if (ix < n - 1) stack.push(i + 1)
-    if (iz > 0) stack.push(i - n)
-    if (iz < n - 1) stack.push(i + n)
-  }
+  const mask = new Uint8Array(plots.labels.length)
+  for (let i = 0; i < mask.length; i++) mask[i] = plots.labels[i] === plotting.current ? 1 : 0
   const plan = planCoverage(
-    { samples: terrain.samples, cell: terrain.options.cell, origin: terrain.origin, mask },
+    {
+      samples: terrain.samples,
+      cell: terrain.options.cell,
+      origin: terrain.origin,
+      mask,
+      // ほかの区画にいるときは、刈れる範囲の中を通って、この区画まで移動する
+      transit: plotting.reach ?? undefined
+    },
     {
       ...route.options,
       cutWidth: params.cutWidth,
@@ -348,6 +431,7 @@ function updateRoute(): void {
   let cells = 0
   for (let i = 0; i < mask.length; i++) cells += mask[i]
   route.text = {
+    plot: `${plotting.current + 1} / ${plots.plots.length}(済み ${plotting.done.size})`,
     area: `${((cells * cell * cell) / 10000).toFixed(2)} ha`,
     lines: `${plan.sweepCount}`,
     cut: formatKm(plan.cutLength),
@@ -361,6 +445,8 @@ function resetAll(): void {
   sim.elapsed = 0
   sim.distance = 0
   timeSettings.hour = queryHour > 0 ? queryHour : START_HOUR
+  // 区画は最初の状態に戻す(刈り終えた印を消し、出発点の区画を選ぶ)
+  plotting.dirty = true
   route.dirty = true
   route.follower = null
   deckLift = 0
@@ -741,6 +827,7 @@ syncs.push(
 )
 
 const setRouteReadout = addReadout(byId('route-readout'), {
+  plot: '刈る区画',
   area: '刈る面積',
   lines: '列の数',
   cut: '刈る距離',
@@ -776,24 +863,36 @@ function setRouteShow(on: boolean): void {
   syncUi()
 }
 syncs.push(
-  addPanelToggle(byId('route-panel'), '経路', 'G', () => route.show, setRouteShow),
+  addPanelToggle(byId('route-panel'), '区画と経路', 'G', () => route.show, setRouteShow),
 
   () => {
     pathLine.visible = route.show
+    plotOverlay.visible = route.show
   },
   addSlider(routeFields, {
-    label: '刈る範囲',
-    title: '出発点を中心とする正方形の一辺。右端まで動かすと全体を刈る',
-    min: 40,
-    max: FIELD_SIZE,
-    step: 4,
-    get: () => route.extent,
+    label: '区画の広さ',
+    title: '区画 1 つの広さの目安。刈れる範囲を、標高や斜面の向きが似た所どうしで、この広さの区画に分けます',
+    min: 2000,
+    max: 50000,
+    step: 1000,
+    get: () => plotting.options.targetArea,
     set: (v) => {
-      route.extent = v
+      plotting.options.targetArea = v
+      plotting.dirty = true
       route.dirty = true
+      route.follower = null
     },
-    format: (v) => (v >= FIELD_SIZE ? '全体' : `${v.toFixed(0)} m 四方`)
+    format: (v) => `${(v / 10000).toFixed(1)} ha`
   }),
+  addCheck(
+    routeFields,
+    '順に刈り進める',
+    '区画を 1 つ刈り終えたら、続けて次の区画へ進みます。オフにすると、1 つ刈り終えた所で止まります',
+    () => plotting.sequence,
+    (v) => {
+      plotting.sequence = v
+    }
+  ),
   routeSlider('刈る向き', '往復刈りの列の向き。0° で画面の奥行き方向', 'angleDeg', 0, 175, 5, (v) => `${v.toFixed(0)}°`),
   routeSlider('重ねる幅', '隣の列と重ねる幅。刈り残しを防ぐ', 'overlap', 0, 1, 0.05, (v) => `${(v * 100).toFixed(0)} cm`),
   routeSlider('外周の周回', '最後に境界沿いを回る回数。旋回の場所にもなる', 'headlandPasses', 0, 5, 1, (v) => `${v.toFixed(0)} 周`)
@@ -878,7 +977,9 @@ const toggleHelp = setupHelp([
       { keys: ['1', '〜', '9'], text: '倍速(1、2、4、8、16、32、64、128、256 倍)' },
       { keys: ['T'], text: 'タイムラプス(コマ落ちした早送り)の入り切り' },
       { keys: ['P'], text: '自動運転の開始と停止' },
-      { keys: ['G'], text: '経路の表示と非表示' },
+      { keys: ['G'], text: '区画と経路の表示と非表示' },
+      { keys: ['[', ']'], text: '刈る区画を前、次に切り替える' },
+      { keys: ['クリック'], text: '区画を表示しているとき、その区画を刈る区画に選ぶ' },
       { keys: ['R'], text: 'やり直し(芝を元に戻す)' },
       { keys: ['Z'], text: '勾配による区分けの表示と非表示' }
     ]
@@ -907,6 +1008,40 @@ input.onPress('KeyR', resetAll)
 input.onPress('KeyG', () => setRouteShow(!route.show))
 input.onPress('KeyZ', () => setZoneShow(!zoning.show))
 input.onPress('KeyT', () => setTimelapse(!timeSettings.timelapse))
+input.onPress('BracketLeft', () => selectPlot(plotting.current - 1))
+input.onPress('BracketRight', () => selectPlot(plotting.current + 1))
+
+// 区画を表示している間は、地面をクリックして刈る区画を選べる(ドラッグは視点の操作なので除く)
+{
+  let downX = 0
+  let downY = 0
+  canvas.addEventListener('pointerdown', (e) => {
+    downX = e.clientX
+    downY = e.clientY
+  })
+  canvas.addEventListener('pointerup', (e) => {
+    if (e.button !== 0 || !route.show || input.isDown('KeyL')) return
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) return
+    // 視線を少しずつ進め、地面に当たった所の区画を選ぶ
+    const rect = canvas.getBoundingClientRect()
+    const ray = new Vector3(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      1 - ((e.clientY - rect.top) / rect.height) * 2,
+      0.5
+    )
+      .unproject(rig.camera)
+      .sub(rig.camera.position)
+      .normalize()
+    const point = rig.camera.position.clone()
+    for (let travelled = 0; travelled < 3000; travelled += 1) {
+      point.add(ray)
+      if (point.y > terrain.heightAt(point.x, point.z)) continue
+      const id = plotAt(point.x, point.z)
+      if (id >= 0 && id !== plotting.current) selectPlot(id)
+      return
+    }
+  })
+}
 // 定点の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
 input.onPress('KeyE', () => rig.stepOrbit(1))
 input.onPress('KeyQ', () => rig.stepOrbit(-1))
@@ -1081,7 +1216,7 @@ function stepSimulation(): void {
     const out = route.follower.update(state)
     vehicleInput = out
     state.deckDown = out.deckDown
-    if (out.finished) setAutoDrive(false)
+    if (out.finished) finishPlot()
   }
 
   const grade = terrain.gradeAlong(state.x, state.z, state.heading, params.wheelbase)
@@ -1328,6 +1463,7 @@ function frame(now: number): void {
   else if (steps > 0) clippings.update(Math.min(simSeconds, 3 / timeSettings.fps))
   if (zoning.dirty) updateZoning()
   if (route.dirty && (route.show || sim.autoDrive)) updateRoute()
+  else if (plotting.dirty && route.show) updatePlots()
 
   mower.sync(sim.state, simSeconds, terrain)
   // カメラが追う位置。タイムラプスでは、コマごとに飛ぶ機体をなめらかに追わせる
@@ -1354,6 +1490,7 @@ function frame(now: number): void {
   // 後から読み込んだモデルの材質も、影の仕組みに対応させる
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
   pathLine.tick(dt)
+  plotOverlay.tick(dt)
   zoneOverlay.tick(dt)
   pathLine.done = sim.autoDrive || (route.follower && route.follower.segment > 0) ? (route.follower?.progress ?? 0) : 0
   grassBlades.update(rig.camera, bladeSettings.show)

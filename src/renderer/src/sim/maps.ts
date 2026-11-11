@@ -24,8 +24,8 @@ export interface MapSpec {
   /** 芝刈り機の出発点 */
   startX: number
   startZ: number
-  /** 自動運転で刈る範囲の一辺の初期値(m)。地形の格子の一辺以上なら全体 */
-  routeExtent: number
+  /** 区画 1 つの広さの目安の初期値(m²)。刈れる範囲をこの広さの区画に分け、自動運転は区画ごとに刈る */
+  plotArea: number
 }
 
 export const MAPS: MapSpec[] = [
@@ -39,7 +39,7 @@ export const MAPS: MapSpec[] = [
     trees: null,
     startX: -21,
     startZ: -55,
-    routeExtent: 120
+    plotArea: 12000
   },
   {
     id: 'meadow',
@@ -51,7 +51,7 @@ export const MAPS: MapSpec[] = [
     trees: { clearingRadius: 62, variation: 14, spacing: 7.5, outerRadius: 300, lone: 5 },
     startX: 0,
     startZ: -18,
-    routeExtent: 512
+    plotArea: 50000
   }
 ]
 

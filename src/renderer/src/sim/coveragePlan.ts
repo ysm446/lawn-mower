@@ -17,6 +17,11 @@ export interface PlanGrid {
   origin: number
   /** 刈る範囲なら 1 */
   mask: Uint8Array
+  /**
+   * 移動で通ってよい所なら 1。省くと、刈る範囲の中だけを通る。
+   * 刈る範囲の外(ほかの区画)から出発するときや、外を回り込むほうが近いときに使う
+   */
+  transit?: Uint8Array
 }
 
 export interface PlanOptions {
@@ -259,14 +264,25 @@ export function planCoverage(
 
   const builder = new PathBuilder(startX, startZ, startHeading)
 
-  // 移動で通れる所
+  // 移動で通れる所。縁からは少し離れて通る
+  let transitDist = dist
+  if (grid.transit) {
+    transitDist = distanceToOutside(grid.transit, n)
+    for (let i = 0; i < transitDist.length; i++) transitDist[i] *= cell
+  }
+  const transitAt = (x: number, z: number): number => {
+    const gx = (x - origin) / cell
+    const gz = (z - origin) / cell
+    if (gx < 0 || gz < 0 || gx > n - 1 || gz > n - 1) return 0
+    return transitDist[Math.round(gz) * n + Math.round(gx)]
+  }
   const passable = new Uint8Array(n * n)
-  for (let i = 0; i < passable.length; i++) passable[i] = dist[i] >= TRANSIT_MARGIN ? 1 : 0
+  for (let i = 0; i < passable.length; i++) passable[i] = transitDist[i] >= TRANSIT_MARGIN ? 1 : 0
   const clearLine = (ax: number, az: number, bx: number, bz: number): boolean => {
     const steps = Math.ceil(Math.hypot(bx - ax, bz - az) / (cell * 0.5))
     for (let s = 0; s <= steps; s++) {
       const t = steps > 0 ? s / steps : 0
-      if (distAt(ax + (bx - ax) * t, az + (bz - az) * t) < TRANSIT_MARGIN) return false
+      if (transitAt(ax + (bx - ax) * t, az + (bz - az) * t) < TRANSIT_MARGIN) return false
     }
     return true
   }
@@ -307,7 +323,7 @@ export function planCoverage(
     const approach = Math.min(8, gap / 2)
     const px = x - Math.sin(heading) * approach
     const pz = z - Math.cos(heading) * approach
-    if (distAt(px, pz) >= TRANSIT_MARGIN) {
+    if (transitAt(px, pz) >= TRANSIT_MARGIN) {
       const turn = dubinsPath(builder.x, builder.z, builder.heading, px, pz, heading, options.turnRadius)
       builder.addAll(turn.points, false)
     }

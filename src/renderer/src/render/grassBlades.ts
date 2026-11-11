@@ -20,7 +20,7 @@ import {
 } from 'three'
 import type { Terrain } from '../sim/terrain'
 import { LENGTH_FACTOR_MAX, LENGTH_FACTOR_MIN } from '../sim/grassField'
-import { GRASS_GLSL, type GroundUniforms } from './ground'
+import { GRASS_GLSL, GRASS_SPECULAR, type GroundUniforms } from './ground'
 
 export interface GrassBladeOptions {
   /** 葉を描く範囲の半径(m) */
@@ -313,6 +313,7 @@ export class GrassBlades {
           '#include <common>\n' + GRASS_GLSL + '\nvarying vec3 vBladeRoot;\nvarying float vBladeT;\n'
         )
         .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_COLOR)
+        .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n' + GRASS_SPECULAR)
         .replace(
           '#include <normal_fragment_begin>',
           '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL

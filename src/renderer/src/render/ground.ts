@@ -13,7 +13,8 @@ import {
   RedFormat,
   UnsignedByteType,
   MeshStandardMaterial,
-  Vector2
+  Vector2,
+  Vector3
 } from 'three'
 import type { GrassField } from '../sim/grassField'
 import type { Terrain } from '../sim/terrain'
@@ -30,6 +31,8 @@ export interface GroundUniforms {
   uBladeAmount: { value: number }
   /** 荒れ具合(0〜1) */
   uRough: { value: number }
+  /** 太陽の向き(地面から太陽へ向かう単位ベクトル) */
+  uSunDir: { value: Vector3 }
   [name: string]: { value: unknown }
 }
 
@@ -60,6 +63,7 @@ uniform vec2 uBladeCenter;
 uniform float uBladeRadius;
 uniform float uBladeAmount;
 uniform float uRough; // 荒れ具合(0 は手入れされた芝、1 は荒れ草地)
+uniform vec3 uSunDir; // 太陽の向き
 
 float mowHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -164,6 +168,9 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
     color *= 1.0 + (streak - 0.5) * 0.14 * (1.0 - tall) * min(leanLength, 1.0);
   }
 
+  // 逆光: 葉は光を少し通すので、太陽に向かって見ると、黄みがかって明るく見える
+  float backlit = pow(max(dot(toFrag, uSunDir), 0.0), 3.0);
+  color *= mix(vec3(1.0), vec3(1.5, 1.42, 0.95), backlit * 0.6);
   // 刈りカス: 刈った所に、切れた葉が点々と残る。近くでだけ見える
   float litter = (1.0 - tall) * state.b * fineFade;
   float fleck = step(0.9, mowHash(floor(world.xz * 42.0) + 3.7));
@@ -182,6 +189,16 @@ vec3 grassColor = mowGrassColor(vMowWorld, mowState, cameraPosition);
 // 芝の葉を描く範囲では、葉の根元の陰として地面を少し暗くする
 grassColor *= 1.0 - 0.22 * bladeCoverage(vMowWorld.xz);
 diffuseColor.rgb = grassColor;
+`
+
+/**
+ * 芝の反射の抑え。地面と、近景の芝の葉(grassBlades.ts)の両方で使う。
+ * 標準の材質はなめらかな面として反射を計算するので、浅い角度から太陽に向かって見ると、
+ * 鏡のような反射(フレネル)で一面が白く光る。芝は細かな葉の集まりで、そうはならないので、
+ * 浅い角度での反射の上限を下げる。正面に近い角度での反射(葉のきらめき)は変わらない。
+ */
+export const GRASS_SPECULAR = /* glsl */ `
+material.specularF90 = 0.04;
 `
 
 const FRAGMENT_NORMAL = /* glsl */ `
@@ -294,7 +311,8 @@ export function createGround(
     uBladeCenter: { value: new Vector2() },
     uBladeRadius: { value: 1 },
     uBladeAmount: { value: 0 },
-    uRough: { value: 0 }
+    uRough: { value: 0 },
+    uSunDir: { value: new Vector3(0, 1, 0) }
   }
 
   const material = new MeshStandardMaterial({ roughness: 0.6, metalness: 0 })
@@ -309,6 +327,7 @@ export function createGround(
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)
       .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_COLOR)
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n' + GRASS_SPECULAR)
       .replace(
         '#include <normal_fragment_begin>',
         '#include <normal_fragment_begin>\n' + FRAGMENT_NORMAL
