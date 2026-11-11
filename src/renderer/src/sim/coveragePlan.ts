@@ -462,32 +462,28 @@ export function planCoverage(
       for (const sweep of sweeps) if (!mine.has(sweep.line)) sweep.done = true
     }
 
-    // 今いる所から近い端を持つ列を、順に選んで刈る
+    // 列を刈る向きは、何本目の列かで先に決めておく(偶数番目は a から b へ、奇数番目は b から a へ)。
+    // 隣り合う列がいつも逆向きになり、分担しても、途中から作り直しても、縞は 1 台で刈ったときと同じに揃う。
+    // その向きの始点が今いる所から近い列を、順に選んで刈る
     for (let remaining = sweeps.filter((s) => !s.done).length; remaining > 0; remaining--) {
       let best: Sweep | null = null
-      let bestReverse = false
       let bestDist = Infinity
       // 刈刃のある位置から測る
       const fromX = builder.x + Math.sin(builder.heading) * lead
       const fromZ = builder.z + Math.cos(builder.heading) * lead
       for (const sweep of sweeps) {
         if (sweep.done) continue
-        const da = Math.hypot(sweep.ax - fromX, sweep.az - fromZ)
-        const db = Math.hypot(sweep.bx - fromX, sweep.bz - fromZ)
-        if (da < bestDist) {
-          bestDist = da
+        const reverse = sweep.line % 2 === 1
+        const d = Math.hypot((reverse ? sweep.bx : sweep.ax) - fromX, (reverse ? sweep.bz : sweep.az) - fromZ)
+        if (d < bestDist) {
+          bestDist = d
           best = sweep
-          bestReverse = false
-        }
-        if (db < bestDist) {
-          bestDist = db
-          best = sweep
-          bestReverse = true
         }
       }
       const sweep = best as Sweep
       sweep.done = true
       sweepCount++
+      const bestReverse = sweep.line % 2 === 1
       const sx = bestReverse ? sweep.bx : sweep.ax
       const sz = bestReverse ? sweep.bz : sweep.az
       const ex = bestReverse ? sweep.ax : sweep.bx
