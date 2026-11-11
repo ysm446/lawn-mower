@@ -47,6 +47,16 @@ const LEVEL_DISTANCE = 26
 const SIGHT_LIMIT = 4000
 /** 段の上限(4 なら 16 倍まで) */
 const MAX_LEVEL = 4
+/**
+ * 次の段へ移る準備を始める所(段の中での進み具合、0〜1)。ここから段の終わりまでに、
+ * 次の段で無くなる葉を少しずつ低くして消し、残る葉を次の段の太さまで少しずつ太くする
+ */
+const BLEND_START = 0.5
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(Math.max((x - edge0) / (edge1 - edge0), 0), 1)
+  return t * t * (3 - 2 * t)
+}
 
 const VERTEX_HEADER = /* glsl */ `
 attribute vec2 aCell;
@@ -56,6 +66,7 @@ uniform float uHeightCell;
 uniform vec2 uPatchCell;
 uniform float uSpacing;
 uniform float uBladeScale; // 離れて見るときの、葉の間隔と太さの倍率(1、2、4、…)
+uniform float uBladeBlend; // 次の段へ移る進み具合(0〜1)
 uniform float uBladeWidth;
 uniform sampler2D uLengthMap;
 uniform float uLengthOrigin;
@@ -71,6 +82,29 @@ uniform float uBladeAmount;
 uniform float uRough;
 varying vec3 vBladeRoot;
 varying float vBladeT;
+
+// 整数のマス目の番号から乱数を作る(PCG)。番号が大きくても偏らない
+uvec2 bladePcg(uvec2 v) {
+  v = v * 1664525u + 1013904223u;
+  v.x += v.y * 1664525u;
+  v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  v.x += v.y * 1664525u;
+  v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  return v;
+}
+
+float bladeUnit(uint h) {
+  return float(h >> 8u) / 16777216.0;
+}
+
+// 段ごとの太さの増し方(まばらにした分を埋める)。full はその段の密な範囲の半径
+float bladeWideAt(float distance, float full) {
+  return 1.0
+    + 0.8 * smoothstep(full * 0.55, full, distance)
+    + 1.2 * smoothstep(full * 1.1, full * 2.0, distance);
+}
 
 float bladeHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -109,11 +143,55 @@ float terrainHeight(vec2 xz) {
 // 法線を決める所で、葉 1 枚ぶんの位置をまとめて計算しておく
 const VERTEX_NORMAL = /* glsl */ `
 vec2 bladeCell = aCell + uPatchCell;
-float rndA = bladeHash(bladeCell);
-float rndB = bladeHash(bladeCell + 17.3);
-float rndC = bladeHash(bladeCell + 41.7);
-vec2 bladeRoot = (bladeCell + vec2(rndA, rndB)) * uSpacing * uBladeScale;
-float groundY = terrainHeight(bladeRoot);
+// 葉 1 枚ごとの番号は、いちばん細かい段(1 段目)のマス目で決める。段が変わっても同じ葉は同じ番号になり、
+// 位置も乱数も変わらない(段を移るときに、葉が一斉に置き直されないようにする)
+ivec2 baseCell = ivec2(floor(bladeCell * uBladeScale + 0.5));
+// 番号がどれだけ粗いマス目に乗っているか(1、2、4、…、128)。粗いマス目に乗る葉ほど、上の段まで残る
+int baseBits = baseCell.x | baseCell.y;
+int rank = 1;
+for (int k = 0; k < 7; k++) {
+  if ((baseBits & (rank * 2 - 1)) == 0) rank *= 2;
+}
+uvec2 bladeH1 = bladePcg(uvec2(baseCell));
+uvec2 bladeH2 = bladePcg(bladeH1 ^ uvec2(0x9e3779b9u, 0x7f4a7c15u));
+float rndA = bladeUnit(bladeH1.x);
+float rndB = bladeUnit(bladeH1.y);
+float rndC = bladeUnit(bladeH2.x);
+float rndD = bladeUnit(bladeH2.y);
+// 位置は、乗っているマス目の 1 マスの中でばらつかせる(上の段まで残る葉は、その段の 1 マスの中でばらつく)。
+// 16 倍(最上段)より粗くはしない
+vec2 bladeRoot = (vec2(baseCell) + float(min(rank, 16)) * vec2(rndA, rndB)) * uSpacing;
+
+// 範囲の縁に向かって葉を低くし、境目を目立たなくする
+float lodDistance = length(bladeRoot - uBladeCenter);
+float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, lodDistance));
+// 遠くは葉をまばらにする。ある距離で一斉に間引くと境目が線になって見えるので、
+// 間引かれる葉を距離に応じて少しずつ低くして消し、残る葉を少しずつ太くする。
+// この段のマス目で見て、毎マスの葉は密な範囲まで、2 マスおきの葉はその 2 倍まで、4 マスおきの葉は 4 倍まで、
+// それより粗いマス目の葉は最後まで残る(次の段では、2 マスおきの葉が毎マスの葉になり、同じ距離で消える)
+float lodFull = FULL_RADIUS * uBladeScale;
+float lodRank = float(rank) / uBladeScale;
+float lodEnd = lodRank < 1.5 ? lodFull : lodRank < 3.0 ? lodFull * 2.0 : lodRank < 6.0 ? lodFull * 4.0 : 1e9;
+bladeFade *= 1.0 - smoothstep(lodEnd * 0.55, lodEnd, lodDistance);
+// 次の段で無くなる葉(毎マスの葉)は、次の段へ近づくにつれて低くして消す
+if (lodRank < 1.5) bladeFade *= 1.0 - uBladeBlend;
+// 太さは、この段の太さから次の段の太さへ移していく
+float bladeWide = mix(
+  bladeWideAt(lodDistance, lodFull) * mix(1.0, uBladeScale, 0.8),
+  bladeWideAt(lodDistance, lodFull * 2.0) * mix(1.0, uBladeScale * 2.0, 0.8),
+  uBladeBlend
+);
+
+float groundY = 0.0;
+float bladeHeight = 0.0;
+float bladeLength = 0.0;
+float layAngle = 0.0;
+vec2 leanDir = vec2(0.0);
+vec2 bladeBend = vec2(0.0);
+vec2 widthDir = vec2(1.0, 0.0);
+// 消えている葉は、ここから先の計算(地形と状態マップを読む所)を飛ばす。高さ 0 で描かれない
+if (bladeFade > 0.0) {
+groundY = terrainHeight(bladeRoot);
 
 // 読む位置を葉ごとに少しずらす。刈り跡の縁で、刈られた葉と残った葉が入り混じる
 vec2 mowWobble = (vec2(bladeNoise(bladeRoot * 3.3), bladeNoise(bladeRoot * 3.3 + 19.7)) - 0.5) * 0.2
@@ -127,31 +205,11 @@ if (mowUv.x > 0.0 && mowUv.x < 1.0 && mowUv.y > 0.0 && mowUv.y < 1.0) {
   bladeState.rg = texture2D(uMowMap, clamp(leanUv, 0.0, 1.0)).rg;
 }
 vec2 bladeLean = bladeState.rg * 2.0 - 1.0;
-float bladeHeight = bladeState.a * uMaxHeight;
+bladeHeight = bladeState.a * uMaxHeight;
 float bladeCut = 1.0 - smoothstep(0.02, 0.06, bladeHeight);
 
-// 範囲の縁に向かって葉を低くし、境目を目立たなくする
-float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, length(bladeRoot - uBladeCenter)));
-// 遠くは葉をまばらにする。ある距離で一斉に間引くと境目が線になって見えるので、
-// 間引かれる葉を距離に応じて少しずつ低くして消し、残る葉を少しずつ太くする。
-// 葉の組は、世界に固定したマス目の番号で決める: 4 マスおきの葉は最後まで残り、2 マスおきの葉は
-// 密な範囲の 2 倍まで、それ以外は密な範囲まで
-float lodDistance = length(bladeRoot - uBladeCenter);
-float lodFull = FULL_RADIUS * uBladeScale;
-vec2 lodIn4 = mod(bladeCell, 4.0);
-vec2 lodIn2 = mod(bladeCell, 2.0);
-bool lodKeep4 = lodIn4.x < 0.5 && lodIn4.y < 0.5;
-bool lodKeep2 = lodIn2.x < 0.5 && lodIn2.y < 0.5;
-if (!lodKeep4) {
-  float lodEnd = lodKeep2 ? lodFull * 2.0 : lodFull;
-  bladeFade *= 1.0 - smoothstep(lodEnd * 0.55, lodEnd, lodDistance);
-}
-float bladeWide = 1.0
-  + 0.8 * smoothstep(lodFull * 0.55, lodFull, lodDistance)
-  + 1.2 * smoothstep(lodFull * 1.1, lodFull * 2.0, lodDistance);
 // 伸びた芝は高さも向きもばらつく。刈った芝は揃っている
 // 刈った芝も、刈高ぴったりには揃わない。刃を逃れて少し長く残る葉もまばらにある
-float rndD = bladeHash(bladeCell + 73.9);
 float cutVary = 0.7 + 0.6 * rndC + step(0.965, rndD) * (0.8 + 1.2 * rndA);
 // 伸びた芝は、場所によって長さが違う。数 m ごとの株のかたまりと、もっと大きな広がりで変える
 float lengthPatch = texture2D(uLengthMap, (bladeRoot - uLengthOrigin) / uLengthSize).r;
@@ -160,11 +218,11 @@ bladeHeight *= mix(longVary, cutVary, bladeCut) * bladeFade;
 // 荒れ草地の草は、向きがより乱れ、倒れかかったものも混じる
 float wild = (1.0 - bladeCut) * (0.55 + 0.5 * uRough) + 0.08;
 float wildAngle = rndB * 6.2832;
-vec2 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
+bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
 
 // 刈った芝は、刈刃とローラーに押されて進行方向へ寝る。寝る角度(鉛直からの角度)を決める
 float leanAmount = length(bladeLean);
-vec2 leanDir = leanAmount > 0.01 ? bladeLean / leanAmount : vec2(0.0);
+leanDir = leanAmount > 0.01 ? bladeLean / leanAmount : vec2(0.0);
 // 伸びた芝も、車輪に踏まれた所(向きが書き込まれた所)は寝る
 float laid = min(leanAmount, 1.0);
 // 寝方にはむらがある。場所によって寝方が弱く、起き上がったままの葉も混じる
@@ -174,10 +232,10 @@ float pressed = smoothstep(0.84, 0.97, leanAmount);
 // 0.5 は車輪の跡の強さ(ground.ts の TRACK_STRENGTH と揃える)
 pressed *= 0.5;
 laid = mix(laid * layPatch * (rndD < 0.22 ? 0.25 : 1.0), 1.0, pressed);
-float layAngle = laid * mix(1.1 + 0.5 * (rndB - 0.5), 1.38, pressed);
+layAngle = laid * mix(1.1 + 0.5 * (rndB - 0.5), 1.38, pressed);
 // 寝た葉は、刈高と同じ高さに収まる分だけ長く見える
 // 伸びた芝は長さがそのままで、寝た分だけ低くなる
-float bladeLength = mix(bladeHeight, bladeHeight / max(cos(layAngle), 0.4), bladeCut);
+bladeLength = mix(bladeHeight, bladeHeight / max(cos(layAngle), 0.4), bladeCut);
 
 // 地形の傾きから法線を求める。地面と同じ明るさで照らすため
 float slopeX = terrainHeight(bladeRoot + vec2(0.5, 0.0)) - terrainHeight(bladeRoot - vec2(0.5, 0.0));
@@ -187,19 +245,21 @@ vec3 terrainNormal = normalize(vec3(-slopeX, 1.0, -slopeZ));
 // 寝た葉は、面が倒れた向きの上側を向く(幅は倒れた向きと直交する)
 float freeAngle = rndA * 6.2832;
 float laidAngle = atan(leanDir.y, leanDir.x) + 1.5708 + (rndA - 0.5) * 0.9;
-vec2 widthDir = normalize(mix(vec2(cos(freeAngle), sin(freeAngle)), vec2(cos(laidAngle), sin(laidAngle)), laid));
+widthDir = normalize(mix(vec2(cos(freeAngle), sin(freeAngle)), vec2(cos(laidAngle), sin(laidAngle)), laid));
 vec3 faceNormal = vec3(-widthDir.y, 0.0, widthDir.x) * (rndC > 0.5 ? 1.0 : -1.0);
 vec3 bendTilt = vec3(bladeBend.x, 0.0, bladeBend.y) * position.y;
-vec3 freeNormal = terrainNormal * (0.7 + 0.5 * position.y) + faceNormal * 0.55 / uBladeScale - bendTilt * 0.5;
+vec3 freeNormal = terrainNormal * (0.7 + 0.5 * position.y)
+  + faceNormal * 0.55 / mix(uBladeScale, uBladeScale * 2.0, uBladeBlend) - bendTilt * 0.5;
 // 寝た葉の表面は、倒れた向きと逆側へ傾いた上向きになる。縞の明暗はここから生まれる
 vec3 laidNormal = terrainNormal * (0.25 + sin(layAngle)) - vec3(leanDir.x, 0.0, leanDir.y) * cos(layAngle) * 0.8
   + faceNormal * 0.2;
 objectNormal = normalize(mix(freeNormal, laidNormal, laid));
+}
 `
 
 const VERTEX_POSITION = /* glsl */ `
 float bladeT = position.y;
-vec2 bladeSide = widthDir * position.x * uBladeWidth * bladeWide * mix(1.0, uBladeScale, 0.8) * step(0.001, bladeHeight);
+vec2 bladeSide = widthDir * position.x * uBladeWidth * bladeWide * step(0.001, bladeHeight);
 // 根元は立ち気味で、先へ行くほど寝る
 float layHere = layAngle * (0.45 + 0.55 * bladeT);
 vec2 bladeOffset = bladeSide
@@ -247,7 +307,7 @@ export class GrassBlades {
   private readonly patchCell = new Vector2()
   private readonly geometry: InstancedBufferGeometry
   private readonly scale = { value: 1 }
-  private level = 0
+  private readonly blend = { value: 0 }
   private readonly forward = new Vector3()
   private readonly up = new Vector3()
   private readonly low = new Vector3()
@@ -297,6 +357,7 @@ export class GrassBlades {
       uPatchCell: { value: this.patchCell },
       uSpacing: { value: spacing },
       uBladeScale: this.scale,
+      uBladeBlend: this.blend,
       uBladeWidth: { value: options.bladeWidth }
     }
 
@@ -332,12 +393,14 @@ export class GrassBlades {
   /**
    * 葉を描く範囲の半径(m)を変える。葉の並びを作り直す。
    * 近く(FULL_RADIUS まで)はマス目に 1 枚ずつ。その外は 2 マスおき、さらに外は 4 マスおきにして、
-   * 枚数が増えすぎないようにする。まばらにした分は、葉を太くして埋める
+   * 枚数が増えすぎないようにする。まばらにした分は、葉を太くして埋める。
+   * 描く範囲は、段の中で次の段へ近づくにつれて 2 倍まで広がる(update)。並びはその分まで作っておく
+   * (広がる前は、外側の葉は消えていて、シェーダーが計算を飛ばす)
    */
   setRadius(radius: number): void {
     const spacing = this.options.spacing
     this.options.radius = radius
-    const reach = Math.ceil(radius / spacing)
+    const reach = Math.ceil((radius * 2) / spacing)
     const full = FULL_RADIUS / spacing
     const cells: number[] = []
     for (let iz = -reach; iz <= reach; iz++) {
@@ -395,22 +458,27 @@ export class GrassBlades {
     // 地面すれすれに見ているときは、中央の視線が丘を越えて遠くに当たることがある。
     // 手前の地面が近いなら、そちらに合わせた細かさを保つ
     const sight = Math.min(distance, nearDistance * 3) * (35 / camera.getFocalLength())
-    // 段を決める。境目で行き来してちらつかないよう、今の段から動くには 15% の余裕を越える必要がある
-    let level = this.level
-    while (level < MAX_LEVEL && sight > LEVEL_DISTANCE * 2 ** level * 1.15) level++
-    while (level > 0 && sight < LEVEL_DISTANCE * 2 ** (level - 1) * 0.85) level--
-    this.level = level
+    // 段を決める。段の中での進み具合(0〜1)に合わせて、次の段の見え方へ少しずつ近づける。
+    // 段の終わりと次の段の始めで見え方が同じになるので、境目で段を行き来しても、葉は入れ替わらない
+    const octaves = Math.max(Math.log2(Math.max(sight, 1e-3) / LEVEL_DISTANCE), 0)
+    const level = Math.min(Math.floor(octaves), MAX_LEVEL)
+    const within = level < MAX_LEVEL ? octaves - level : 0
     const scale = 2 ** level
     const spacing = this.options.spacing * scale
-    const radius = this.options.radius * scale
+    // 描く範囲も、段の中で 2 倍まで広げる(見ている地面までの距離に比例する)。次の段の始めの範囲とつながる
+    const radius = this.options.radius * scale * 2 ** within
+    const blend = smoothstep(BLEND_START, 1, within)
     this.scale.value = scale
+    this.blend.value = blend
     this.ground.uBladeRadius.value = radius
 
     // 範囲の中心は、視線が地面に当たる所。
     // 葉が密なのは中心のまわり(FULL_RADIUS まで)なので、中心を離しすぎると、手前の葉がまばらになる。
     // 画面に写るいちばん手前の地面が密な範囲に入るように、そこから離せる距離を限る。
-    // 描く距離(radius)を伸ばしても中心は動かさず、外側へ広がるだけにする
-    const ahead = Math.min(reach, nearReach + Math.min(FULL_RADIUS * scale, radius) * 0.75)
+    // 描く距離(radius)を伸ばしても中心は動かさず、外側へ広がるだけにする。
+    // 次の段へ近づくと毎マスの葉が消え、密な範囲は 2 マスおきの葉の範囲(2 倍)になる
+    const full = FULL_RADIUS * scale * (1 + blend)
+    const ahead = Math.min(reach, nearReach + Math.min(full, radius) * 0.75)
     const cx = position.x + (flat > 1e-4 ? (this.forward.x / flat) * ahead : 0)
     const cz = position.z + (flat > 1e-4 ? (this.forward.z / flat) * ahead : 0)
     this.mesh.visible = enabled
