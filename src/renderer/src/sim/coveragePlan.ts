@@ -519,7 +519,10 @@ export function planCoverage(
       const loop = best as number[]
       pending.delete(loop)
       const m = loop.length
-      const at = (k: number): number => (bestVertex + k * 2) % m
+      // 回る向きは、周ごとに交互にする(いちばん外の周から数えて 1 周おきに逆回り)。
+      // 芝の倒れる向きが周ごとに変わり、外周にも明暗の輪ができる。同じ向きばかりだと寝癖や轍もつきやすい
+      const step = pass % 2 === 0 ? 2 : -2
+      const at = (k: number): number => (((bestVertex + k * step) % m) + m) % m
       const x0 = loop[at(0)]
       const z0 = loop[at(0) + 1]
       const heading = Math.atan2(loop[at(1)] - x0, loop[at(1) + 1] - z0)
