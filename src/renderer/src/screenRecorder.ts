@@ -31,6 +31,8 @@ function videoBitrate(width: number, height: number, fps: number): number {
 export function initScreenRecorder(options: {
   /** 設定の「録画のコマ数」 */
   fps: () => number
+  /** 設定の「マウスポインタを写す」 */
+  cursor: () => boolean
   /** 保存したとき。保存できなかったときは null */
   onSaved: (filePath: string | null) => void
 }): void {
@@ -44,14 +46,15 @@ export function initScreenRecorder(options: {
     const ratio = window.devicePixelRatio
     const width = evenSize(window.innerWidth * ratio)
     const height = evenSize(window.innerHeight * ratio)
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        width: { ideal: width, max: width },
-        height: { ideal: height, max: height },
-        frameRate: { ideal: fps, max: fps }
-      },
-      audio: false
-    })
+    // cursor は画面の取り込みの制約(Chromium が対応している)。'never' でマウスポインタを描かない。
+    // 画面の上のポインタはそのまま見える。TypeScript の型には無いので、足して渡す
+    const video = {
+      width: { ideal: width, max: width },
+      height: { ideal: height, max: height },
+      frameRate: { ideal: fps, max: fps },
+      cursor: options.cursor() ? 'always' : 'never'
+    } as MediaTrackConstraints
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false })
     const format = FORMATS.find((f) => MediaRecorder.isTypeSupported(f.mimeType))
     if (!format) {
       stream.getTracks().forEach((track) => track.stop())

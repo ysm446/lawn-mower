@@ -1579,6 +1579,12 @@ const toggleSettings = setupSettings(
             { value: 30, label: '30' },
             { value: 60, label: '60' }
           ]
+        },
+        {
+          type: 'check',
+          key: 'recordingCursor',
+          label: 'マウスポインタを写す',
+          title: 'Ctrl+F12 で録画するとき、マウスポインタも動画に写します。既定は外してあり、画面の上では見えたまま、動画には写りません'
         }
       ]
     }
@@ -1624,6 +1630,8 @@ const showSavedToast = ((): ((kind: 'screenshot' | 'recording', filePath: string
 window.lawnApi?.onScreenshot((filePath) => showSavedToast('screenshot', filePath))
 initScreenRecorder({
   fps: () => settings.recordingFps,
+  // 起動時の指定 reccursor=0 でも写さない(動作確認用)
+  cursor: () => settings.recordingCursor && query.get('reccursor') !== '0',
   onSaved: (filePath) => showSavedToast('recording', filePath)
 })
 if (query.get('settings') === '1') toggleSettings()
