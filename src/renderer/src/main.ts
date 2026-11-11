@@ -553,6 +553,8 @@ if (queryChase && queryChase.length === 2) rig.setChaseAngles(queryChase[0], que
 const queryZoom = Number(query.get('zoom'))
 if (queryZoom > 0) rig.setZoom(queryZoom)
 if (query.get('ui') === '0') document.body.classList.add('minimal-ui')
+// 被写界深度を切って始める(動作確認用)
+if (query.get('dof') === '0') rig.settings.depthOfField = false
 // ------------------------------------------------ UI
 
 const syncs: Sync[] = []
