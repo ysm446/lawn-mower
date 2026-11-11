@@ -102,8 +102,10 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
 
   // 刈っても同じ芝なので、色みは変えない。伸びた芝は葉どうしの陰で少し暗く、むらがある
   vec3 baseColor = mix(vec3(0.088, 0.205, 0.028), vec3(0.118, 0.240, 0.036), nLarge);
-  vec3 longShade = mix(vec3(0.50, 0.48, 0.52), vec3(0.80, 0.74, 0.76), nLarge * 0.4 + nMid * 0.6);
+  vec3 longShade = mix(vec3(0.58, 0.56, 0.60), vec3(0.88, 0.82, 0.84), nLarge * 0.4 + nMid * 0.6);
   float tall = smoothstep(0.02, 0.06, height);
+  // 伸びた芝でも、踏まれて寝た所は葉の面が上を向き、陰が減って明るく見える
+  tall *= 1.0 - 0.5 * min(length(lean), 1.0);
   vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
   color *= 1.0 + (nFine - 0.5) * mix(0.25, 0.6, tall) * fineFade;
 
@@ -117,7 +119,13 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
 
   // 縞: 倒れた向きと視線の向きの関係で明暗をつける
   vec3 toFrag = normalize(world - eye);
-  color *= 1.0 + uStripe * dot(lean, toFrag.xz);
+  // 寝方のむら(芝の葉と同じ位置に出る)。縞が均一になりすぎないようにする
+  float layPatch = mix(0.5, 1.0, mowNoise(world.xz * 0.8 + 3.1));
+  // 車輪に踏まれた所は、むらなく強く寝ている
+  float pressed = smoothstep(0.84, 0.97, length(lean));
+  color *= 1.0 + uStripe * mix(layPatch, 1.2, pressed) * dot(lean, toFrag.xz);
+  // 刈った所にも、刈り方のむらによる濃淡を少し残す
+  color *= 1.0 + (nMid - 0.5) * 0.16 * (1.0 - tall);
 
   // 区分けの色を重ねる
   vec2 zoneUv = (world.xz - uZoneOrigin) / uZoneSize;
@@ -142,7 +150,10 @@ diffuseColor.rgb = grassColor;
 
 const FRAGMENT_NORMAL = /* glsl */ `
 // 倒れた芝の上面は、倒れた向きと逆側に傾く。太陽の向きによる明暗の差になる
-vec3 mowTilt = vec3(-mowLean.x, 0.0, -mowLean.y) * uTilt;
+// 車輪に踏まれた所は葉が強く寝るので、法線も大きく傾く
+float mowPressed = smoothstep(0.84, 0.97, length(mowLean));
+vec3 mowTilt = vec3(-mowLean.x, 0.0, -mowLean.y) * uTilt
+  * mix(mix(0.5, 1.0, mowNoise(vMowWorld.xz * 0.8 + 3.1)), 1.7, mowPressed);
 // 葉の 1 枚 1 枚の向きのばらつきを、細かいノイズで法線に与える。太陽の反射がちらちらと散る
 float glintFade = 1.0 - smoothstep(6.0, 32.0, length(vMowWorld - cameraPosition));
 vec2 glintCell = vMowWorld.xz * 55.0;
@@ -225,7 +236,7 @@ export function createGround(
     uMowTexel: { value: 1 / o.resolution },
     uMaxHeight: { value: o.maxHeight },
     uUncutNorm: { value: uncutHeight / o.maxHeight },
-    uStripe: { value: 0.24 },
+    uStripe: { value: 0.18 },
     uTilt: { value: 0.2 },
     uZoneMap: { value: zoneMap },
     // テクセルの中心が格子点に重なるように、半マス分だけ広く取る

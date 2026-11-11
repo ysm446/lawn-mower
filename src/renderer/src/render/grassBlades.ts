@@ -65,6 +65,18 @@ float bladeHash(vec2 p) {
   return fract(p.x * p.y);
 }
 
+// なめらかなノイズ(地面のシェーダーの mowNoise と同じ式。葉と地面でむらの位置を揃える)
+float bladeNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = bladeHash(i);
+  float b = bladeHash(i + vec2(1.0, 0.0));
+  float c = bladeHash(i + vec2(0.0, 1.0));
+  float d = bladeHash(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 // 地形の高さ。格子の 4 点から補間する(Terrain.heightAt と同じ計算)
 float terrainHeight(vec2 xz) {
   vec2 g = (xz - uHeightOrigin) / uHeightCell;
@@ -102,7 +114,10 @@ float bladeCut = 1.0 - smoothstep(0.02, 0.06, bladeHeight);
 // 範囲の縁に向かって葉を低くし、境目を目立たなくする
 float bladeFade = uBladeAmount * (1.0 - smoothstep(uBladeRadius * 0.6, uBladeRadius, length(bladeRoot - uBladeCenter)));
 // 伸びた芝は高さも向きもばらつく。刈った芝は揃っている
-bladeHeight *= mix(0.55 + 0.9 * rndC, 0.85 + 0.3 * rndC, bladeCut) * bladeFade;
+// 刈った芝も、刈高ぴったりには揃わない。刃を逃れて少し長く残る葉もまばらにある
+float rndD = bladeHash(bladeCell + 73.9);
+float cutVary = 0.7 + 0.6 * rndC + step(0.965, rndD) * (0.8 + 1.2 * rndA);
+bladeHeight *= mix(0.55 + 0.9 * rndC, cutVary, bladeCut) * bladeFade;
 float wild = (1.0 - bladeCut) * 0.55 + 0.08;
 float wildAngle = rndB * 6.2832;
 vec2 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
@@ -110,10 +125,17 @@ vec2 bladeBend = vec2(cos(wildAngle), sin(wildAngle)) * wild;
 // 刈った芝は、刈刃とローラーに押されて進行方向へ寝る。寝る角度(鉛直からの角度)を決める
 float leanAmount = length(bladeLean);
 vec2 leanDir = leanAmount > 0.01 ? bladeLean / leanAmount : vec2(0.0);
-float layAngle = bladeCut * min(leanAmount, 1.0) * (1.02 + 0.3 * (rndB - 0.5));
+// 伸びた芝も、車輪に踏まれた所(向きが書き込まれた所)は寝る
+float laid = min(leanAmount, 1.0);
+// 寝方にはむらがある。場所によって寝方が弱く、起き上がったままの葉も混じる
+float layPatch = mix(0.5, 1.0, bladeNoise(bladeRoot * 0.8 + 3.1));
+// 車輪に踏まれた所(刈っただけの所より向きが強く書き込まれている)は、むらなく強く寝る
+float pressed = smoothstep(0.84, 0.97, leanAmount);
+laid = mix(laid * layPatch * (rndD < 0.22 ? 0.25 : 1.0), 1.0, pressed);
+float layAngle = laid * mix(1.1 + 0.5 * (rndB - 0.5), 1.38, pressed);
 // 寝た葉は、刈高と同じ高さに収まる分だけ長く見える
-float bladeLength = bladeHeight / max(cos(layAngle), 0.4);
-float laid = bladeCut * min(leanAmount, 1.0);
+// 伸びた芝は長さがそのままで、寝た分だけ低くなる
+float bladeLength = mix(bladeHeight, bladeHeight / max(cos(layAngle), 0.4), bladeCut);
 
 // 地形の傾きから法線を求める。地面と同じ明るさで照らすため
 float slopeX = terrainHeight(bladeRoot + vec2(0.5, 0.0)) - terrainHeight(bladeRoot - vec2(0.5, 0.0));

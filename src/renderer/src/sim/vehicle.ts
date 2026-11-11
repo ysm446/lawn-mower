@@ -21,6 +21,10 @@ export interface VehicleParams {
   cutWidth: number
   /** 後輪軸から刈刃までの前方距離 */
   deckOffset: number
+  /** 左右の車輪の間隔 */
+  track: number
+  /** 車輪の幅 */
+  wheelWidth: number
 }
 
 export interface VehicleState {
@@ -56,7 +60,9 @@ export const FAIRWAY_MOWER: VehicleParams = {
   brake: 3.0,
   steerRate: (70 * Math.PI) / 180,
   cutWidth: 3.0,
-  deckOffset: 2.3
+  deckOffset: 2.3,
+  track: 1.3,
+  wheelWidth: 0.3
 }
 
 export function createVehicleState(x = 0, z = 0, heading = 0): VehicleState {
@@ -101,6 +107,22 @@ export function stepVehicle(
   state.x += Math.sin(state.heading) * travel
   state.z += Math.cos(state.heading) * travel
   state.heading += (travel / params.wheelbase) * Math.tan(state.steer)
+}
+
+/**
+ * 4 輪の接地点の位置。out に (x, z) を 後左、後右、前左、前右 の順で書き込む
+ */
+export function wheelPositions(state: VehicleState, params: VehicleParams, out: Float64Array): void {
+  const fx = Math.sin(state.heading)
+  const fz = Math.cos(state.heading)
+  const half = params.track / 2
+  // 進行方向の左は (fz, -fx)
+  for (let i = 0; i < 4; i++) {
+    const side = i % 2 === 0 ? half : -half
+    const ahead = i < 2 ? 0 : params.wheelbase
+    out[i * 2] = state.x + fx * ahead + fz * side
+    out[i * 2 + 1] = state.z + fz * ahead - fx * side
+  }
 }
 
 /** 刈刃の左右端の位置 */

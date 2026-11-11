@@ -18,7 +18,7 @@ import type { Terrain } from '../sim/terrain'
 import type { VehicleParams, VehicleState } from '../sim/vehicle'
 
 const WHEEL_RADIUS = 0.32
-const TRACK = 1.3
+const TRACK = 1.3 // FAIRWAY_MOWER.track と揃える
 
 export class MowerModel {
   readonly root = new Group()

@@ -41,6 +41,7 @@ import {
   deckSegment,
   minTurnRadius,
   stepVehicle,
+  wheelPositions,
   type DeckSegment
 } from './sim/vehicle'
 import { addCheck, addReadout, addSlider, addSwitch, byId, setupHelp, stopsSlider, type Sync } from './ui'
@@ -53,6 +54,10 @@ const MAX_GRASS_HEIGHT = 0.2
 const UNCUT_HEIGHT = 0.1
 const SIM_DT = 1 / 120
 const MAX_STEPS_PER_FRAME = 600
+// 刈った芝が寝る強さ(1 で完全に寝る)。車輪に踏まれた所は 1 にして、刈り跡の中でも筋が残るようにする
+const CUT_LEAN = 0.8
+// 車輪の跡を描き込む間隔(m)
+const TRACK_STEP = 0.12
 const TIME_SCALES = [1, 2, 4, 8, 16, 32, 64]
 // 芝刈り機の出発点
 const START_X = -21
@@ -177,6 +182,9 @@ const sim = {
 }
 let prevDeck: DeckSegment | null = null
 let accumulator = 0
+const wheelsNow = new Float64Array(8)
+const wheelsPrev = new Float64Array(8)
+let tracksStarted = false
 
 // 自動運転の経路。区分けや設定が変わったら、必要になった時点で作り直す
 const route = {
@@ -747,13 +755,49 @@ function stepSimulation(): void {
       deck.rz,
       deck.lx,
       deck.lz,
-      Math.sin(state.heading) * sign,
-      Math.cos(state.heading) * sign,
+      Math.sin(state.heading) * sign * CUT_LEAN,
+      Math.cos(state.heading) * sign * CUT_LEAN,
       sim.cutHeightMm / 1000
     )
     coverage.markSegment(deck.lx, deck.lz, deck.rx, deck.rz)
   }
   prevDeck = state.deckDown ? deck : null
+
+  // 車輪の跡: 芝丈は変えずに、踏んだ所の芝を進行方向へ寝かせる。
+  // 刈刃は車輪より前にあるので、刈った直後の芝の上にも跡が重なる
+  wheelPositions(state, params, wheelsNow)
+  if (!tracksStarted) {
+    wheelsPrev.set(wheelsNow)
+    tracksStarted = true
+  }
+  const moved = Math.hypot(wheelsNow[0] - wheelsPrev[0], wheelsNow[1] - wheelsPrev[1])
+  if (moved > 5) {
+    // やり直しなどで位置が飛んだときは、線を引かない
+    wheelsPrev.set(wheelsNow)
+  } else if (moved >= TRACK_STEP) {
+    const sign = state.speed >= 0 ? 1 : -1
+    const dirX = Math.sin(state.heading) * sign
+    const dirZ = Math.cos(state.heading) * sign
+    const halfX = (Math.cos(state.heading) * params.wheelWidth) / 2
+    const halfZ = (-Math.sin(state.heading) * params.wheelWidth) / 2
+    for (let i = 0; i < 8; i += 2) {
+      mowMap.addQuad(
+        wheelsPrev[i] + halfX,
+        wheelsPrev[i + 1] + halfZ,
+        wheelsPrev[i] - halfX,
+        wheelsPrev[i + 1] - halfZ,
+        wheelsNow[i] - halfX,
+        wheelsNow[i + 1] - halfZ,
+        wheelsNow[i] + halfX,
+        wheelsNow[i + 1] + halfZ,
+        dirX,
+        dirZ,
+        MAX_GRASS_HEIGHT,
+        0.3
+      )
+    }
+    wheelsPrev.set(wheelsNow)
+  }
 }
 
 function resize(): void {

@@ -151,7 +151,8 @@ export class MowMap {
   /**
    * 刈刃が通った四角形を追加する。頂点はワールド座標(X, Z)で、
    * 前の左端、前の右端、今の右端、今の左端の順に渡す。
-   * dirX, dirZ は進行方向の単位ベクトル。
+   * dirX, dirZ は芝を倒す向きと強さ(長さ 1 で完全に寝る)。
+   * cutHeight は刈高。maxHeight を渡すと芝丈は変えず、倒すだけになる(車輪の跡)。
    */
   addQuad(
     ax: number,
@@ -164,13 +165,14 @@ export class MowMap {
     dz: number,
     dirX: number,
     dirZ: number,
-    cutHeight: number
+    cutHeight: number,
+    featherTexels = 1.5
   ): void {
     if (this.quadCount >= MAX_QUADS) this.flush()
     const o = this.options
     const sx = 2 / o.size
-    // 両脇を 1.5 テクセルぶん外へ広げ、そこを縁のぼかしに使う
-    const margin = (o.size / o.resolution) * 1.5
+    // 両脇を featherTexels テクセルぶん外へ広げ、そこを縁のぼかしに使う
+    const margin = (o.size / o.resolution) * featherTexels
     const prevWidth = Math.hypot(ax - bx, az - bz) || 1
     const curWidth = Math.hypot(dx - cx, dz - cz) || 1
     const pux = ((ax - bx) / prevWidth) * margin
