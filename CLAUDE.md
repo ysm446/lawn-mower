@@ -33,6 +33,10 @@
 - `docs/design/` 配下は実装の設計ガイドを置く場所として使う。
 - `docs/plan/` 配下(goals / plan / progress)は進捗管理用の入口として保つ。
 
+## UI
+
+- UI は weather-globe(`D:\GitHub\weather-globe`)の流儀に合わせる。部品を足す前に [docs/design/ui.md](docs/design/ui.md) を確認する。
+
 ## Python 環境
 
 - Python を使う場合は、リポジトリ直下の venv(`.venv`)で実行する。グローバル環境にパッケージを入れない。

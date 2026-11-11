@@ -1,40 +1,512 @@
+/* UI の見た目は weather-globe に合わせている。
+   グレーだけでまとめたすりガラスのパネルを画面の四隅に置き、選んでいるものは明るさで見分ける。 */
+
+:root {
+  color-scheme: dark;
+  --bg: #0e0e0e;
+  /* すりガラスのパネル。透明にするだけでは明るい芝の上で文字が読めないので、後ろの明るさも落とす */
+  --panel: rgba(190, 190, 190, 0.04);
+  --panel-strong: rgba(32, 32, 32, 0.75);
+  --glass: blur(8px) brightness(0.35) saturate(1.4);
+  --panel-glow: inset 0 0 16px rgba(208, 208, 208, 0.04);
+  --field: #121212;
+  --line: rgba(178, 178, 178, 0.18);
+  --text: #f2f2f2;
+  --text-2: #bebebe;
+  --text-3: #afafaf;
+  --accent: #e6e6e6;
+  --warn: #f2c56b;
+  /* 右下の操作部の高さと、上のパネルとの間隔 */
+  --controls-space: 44px;
+  font-family: 'Noto Sans JP', 'Yu Gothic UI', system-ui, -apple-system, 'Hiragino Sans', sans-serif;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(178, 178, 178, 0.28) padding-box;
+  border: 2px solid transparent;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(178, 178, 178, 0.45);
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+}
+
 html,
 body {
-  margin: 0;
   height: 100%;
+  margin: 0;
   overflow: hidden;
-  background: #000;
-  font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', sans-serif;
-}
-
-#view {
-  display: block;
-  width: 100vw;
-  height: 100vh;
-}
-
-#hud,
-#help {
-  position: fixed;
-  left: 12px;
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1.6;
-  pointer-events: none;
+  background: var(--bg);
+  color: var(--text);
   user-select: none;
 }
 
-#hud {
-  top: 12px;
-  white-space: pre;
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+#app canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  min-height: 30px;
+  padding: 3px 12px;
+  background: rgba(178, 178, 178, 0.1);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: rgba(178, 178, 178, 0.2);
+}
+
+button:active:not(:disabled) {
+  background: rgba(178, 178, 178, 0.28);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#status-panel,
+#fps-counter,
+#top-right button,
+#view-hint,
+.side-panel,
+.switch,
+#key-help::before {
+  backdrop-filter: var(--glass);
+}
+
+#status-panel,
+#top-right button,
+.side-panel,
+.switch,
+#key-help::before {
+  box-shadow: var(--panel-glow);
+}
+
+/* ------------------------------------------------ 左上: 状態 */
+
+#top-left {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+}
+
+#status-panel {
+  width: 220px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+
+.readout {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.readout > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.readout dt {
+  color: var(--text-2);
+}
+
+.readout dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#fps-counter {
+  padding: 2px 8px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  background: var(--panel);
+  border-radius: 6px;
+}
+
+/* ------------------------------------------------ 右上: ボタン */
+
+#top-right {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 6px;
+}
+
+#top-right button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-height: 0;
+  padding: 0;
+  background: var(--panel);
+  border-color: transparent;
+}
+
+#top-right button:hover:not(:disabled) {
+  background: var(--panel-strong);
+}
+
+#top-right button[aria-pressed='true'] {
+  background: rgba(178, 178, 178, 0.26);
+  border-color: var(--line);
+}
+
+#toggle-auto[aria-pressed='false'] #auto-on-icon,
+#toggle-auto[aria-pressed='true'] #auto-off-icon {
+  display: none;
+}
+
+/* ------------------------------------------------ 上中央: 操作の案内 */
+
+#top-center {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 620px);
+  pointer-events: none;
+}
+
+#view-hint {
+  padding: 6px 14px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  background: var(--panel);
+  border-radius: 8px;
+}
+
+/* ------------------------------------------------ 右の列: 設定のパネル */
+
+#right-stack {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  width: 280px;
+  max-height: calc(100vh - 76px - var(--controls-space));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden auto;
+  pointer-events: none;
+}
+
+#right-stack > * {
+  pointer-events: auto;
+}
+
+.side-panel {
+  flex: none;
+  align-self: flex-end;
+  width: 280px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+
+/* 閉じているときは見出しの幅まで縮める */
+.side-panel:has(> .panel-fold:not([open])) {
+  width: max-content;
+  padding-block: 6px;
+}
+
+.panel-fold > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+}
+
+.panel-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.panel-fold > summary:hover {
+  color: var(--text);
+}
+
+/* 開閉の向きを示す印 */
+.panel-fold > summary::after {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-right: 3px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.panel-fold[open] > summary {
+  margin-bottom: 8px;
+}
+
+.panel-fold[open] > summary::after {
+  transform: translateY(2px) rotate(-135deg);
+}
+
+.field-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+
+.readout + .field-list {
+  margin-top: 10px;
+}
+
+.field-list label {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.range-row input {
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+}
+
+/* --fill はつまみの左側の割合 */
+.range-row input::-webkit-slider-runnable-track {
+  height: 3px;
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--fill, 0%),
+    rgba(178, 178, 178, 0.28) var(--fill, 0%)
+  );
+  border-radius: 2px;
+}
+
+.range-row input::-webkit-slider-thumb {
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  background: var(--accent);
+  border-radius: 50%;
+  appearance: none;
+}
+
+.range-row output {
+  min-width: 52px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------ 右下: 切り替え */
+
+#bottom-right {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+#bottom-right > * {
+  pointer-events: auto;
+}
+
+.switch {
+  display: flex;
+  padding: 3px;
+  gap: 2px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+
+.switch button {
+  min-width: 64px;
+  background: transparent;
+  border-color: transparent;
+}
+
+#speed-switch button {
+  min-width: 44px;
   font-variant-numeric: tabular-nums;
 }
 
-#help {
-  bottom: 12px;
+.switch button:hover {
+  background: rgba(178, 178, 178, 0.14);
+}
+
+.switch button[aria-pressed='true'] {
+  color: var(--text);
+  font-weight: 600;
+  background: rgba(178, 178, 178, 0.26);
+  border-color: var(--line);
+}
+
+.switch button[aria-pressed='false'] {
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------ 操作の一覧 */
+
+#key-help {
+  width: 760px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  padding: 16px 20px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+}
+
+#key-help::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--panel);
+  border-radius: inherit;
+}
+
+#key-help::backdrop {
+  background: transparent;
+}
+
+#key-help[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#key-help h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+#key-help h3 {
+  margin: 0 0 6px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+/* 幅に合わせて段を組む。区分の途中では段を分けない */
+#key-help-body {
+  margin-top: 12px;
+  overflow-y: auto;
+  columns: 2 320px;
+  column-gap: 32px;
+}
+
+#key-help-body section {
+  break-inside: avoid;
+  padding-bottom: 12px;
+}
+
+#key-help-body dl {
+  display: grid;
+  grid-template-columns: 9em 1fr;
+  gap: 5px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+#key-help-body dt {
+  color: var(--text-2);
+}
+
+#key-help-body dd {
+  margin: 0;
+}
+
+#key-help-body kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 5px;
+  color: var(--text);
+  font: inherit;
   font-size: 12px;
-  opacity: 0.85;
+  line-height: 1.6;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+/* 動作確認用: ?ui=0 で設定のパネルと案内を隠す */
+body.minimal-ui #right-stack,
+body.minimal-ui #top-center {
+  display: none;
 }

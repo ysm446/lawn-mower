@@ -45,6 +45,10 @@
 - 未確定の変更は、必要に応じて先頭付近に「未リリース」セクションを作って記録する。
 - バージョン見出しや履歴見出しに日時を書く場合は `YYYY-MM-DD HH:MM` 形式を使う。
 
+## UI
+
+- UI は weather-globe(`D:\GitHub\weather-globe`)の流儀に合わせる。部品を足す前に `docs/design/ui.md` を確認する。
+
 ## Python 環境
 
 - Python を使う場合は、リポジトリ直下の venv(`.venv`)で実行する。グローバル環境にパッケージを入れない。
