@@ -37,6 +37,8 @@ export interface RouteState {
   follower: PathFollower | null
   /** 経路のパネルに出す値 */
   text: { plot: string; area: string; lines: string; cut: string; transit: string; time: string }
+  /** 分担して刈るとき、経路を作った時点の組(機体の番号の並び)。組に新しい機体が加わったら作り直す */
+  team: number[]
 }
 
 /** 1 刻み進めるのに要る、全台で共有するもの */
@@ -60,11 +62,14 @@ export class MowerUnit {
   distance = 0
   /** 自動運転で受け持つ区画の番号。-1 は未定 */
   plot = -1
+  /** 分担して刈るとき、自分の分を刈り終えた区画(ほかの機体がまだ刈っていても、もう加わらない)。-1 はなし */
+  finishedPlot = -1
   readonly route: RouteState = {
     dirty: true,
     plan: null,
     follower: null,
-    text: { plot: '-', area: '-', lines: '-', cut: '-', transit: '-', time: '-' }
+    text: { plot: '-', area: '-', lines: '-', cut: '-', transit: '-', time: '-' },
+    team: []
   }
   readonly model: MowerModel
   /** カメラが追う位置。タイムラプスでは、コマごとに飛ぶ機体をなめらかに追わせる */
@@ -107,6 +112,8 @@ export class MowerUnit {
     this.autoDrive = false
     this.distance = 0
     this.plot = -1
+    this.finishedPlot = -1
+    this.route.team = []
     this.route.dirty = true
     this.route.plan = null
     this.route.follower = null

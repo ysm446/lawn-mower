@@ -265,7 +265,9 @@ const plotting = {
   /** 刈り終えた区画。どの機体が刈る区画かは、機体ごとに持つ(MowerUnit.plot) */
   done: new Set<number>(),
   /** 1 つ刈り終えたら、続けて次の区画へ進むか */
-  sequence: true
+  sequence: true,
+  /** 自動運転の機体が、同じ区画の列を分け合って刈るか(オフなら、別々の区画を刈る)。起動時の指定 team=1 でオン */
+  teamwork: query.get('team') === '1'
 }
 
 function updatePlots(): void {
@@ -289,7 +291,10 @@ function updatePlots(): void {
   plotting.result = result
   plotting.done.clear()
   // 区画が変わったので、受け持つ区画は決め直す(自動運転のとき、空いている区画を引き受ける)
-  for (const unit of mowers) unit.plot = -1
+  for (const unit of mowers) {
+    unit.plot = -1
+    unit.finishedPlot = -1
+  }
   plotOverlay.update(result)
   refreshPlotOverlay()
   markRoutesDirty()
@@ -320,7 +325,18 @@ function plotTaken(id: number, except: MowerUnit): boolean {
 function assignPlot(unit: MowerUnit): void {
   const result = plotting.result
   if (!result || result.plots.length === 0) return
-  const free = (id: number): boolean => id >= 0 && !plotting.done.has(id) && !plotTaken(id, unit)
+  if (plotting.teamwork) {
+    // 分担して刈るときは、今の区画を続けるか、ほかの機体が刈っている区画に加わる(自分の分を終えた区画には戻らない)
+    const open = (id: number): boolean => id >= 0 && !plotting.done.has(id) && id !== unit.finishedPlot
+    if (open(unit.plot)) return
+    const joined = teamPlots(unit).find(open)
+    if (joined !== undefined) {
+      unit.plot = joined
+      return
+    }
+  }
+  const free = (id: number): boolean =>
+    id >= 0 && !plotting.done.has(id) && !plotTaken(id, unit) && id !== unit.finishedPlot
   if (free(unit.plot)) return
   const here = plotAt(unit.state.x, unit.state.z)
   if (free(here)) {
@@ -342,8 +358,50 @@ function assignPlot(unit: MowerUnit): void {
     }
   }
   // 空いている区画がなければ、刈り終えていない区画を(重なってもよいので)受け持つ
-  if (best < 0) best = result.plots.find((p) => !plotting.done.has(p.id))?.id ?? -1
+  if (best < 0) best = result.plots.find((p) => !plotting.done.has(p.id) && p.id !== unit.finishedPlot)?.id ?? -1
   unit.plot = best
+}
+
+/** ほかの自動運転の機体が刈っている区画(近い機体の順) */
+function teamPlots(unit: MowerUnit): number[] {
+  return mowers
+    .filter((m) => m !== unit && m.autoDrive && m.plot >= 0 && !plotting.done.has(m.plot))
+    .sort(
+      (a, b) =>
+        Math.hypot(a.state.x - unit.state.x, a.state.z - unit.state.z) -
+        Math.hypot(b.state.x - unit.state.x, b.state.z - unit.state.z)
+    )
+    .map((m) => m.plot)
+}
+
+/**
+ * 区画を分担して刈る組。その区画を受け持つ自動運転の機体を、列に直交する向きの位置の順に並べる
+ * (列の並びの左から順に、まとまりを割り振るため)。分担しないときは、その機体だけ
+ */
+function teamOf(unit: MowerUnit): MowerUnit[] {
+  if (!plotting.teamwork || unit.plot < 0) return [unit]
+  const angle = (route.options.angleDeg * Math.PI) / 180
+  const nx = Math.cos(angle)
+  const nz = -Math.sin(angle)
+  return mowers
+    .filter((m) => m === unit || (m.autoDrive && m.plot === unit.plot && m.finishedPlot !== unit.plot))
+    .sort((a, b) => a.state.x * nx + a.state.z * nz - (b.state.x * nx + b.state.z * nz))
+}
+
+/**
+ * 分担している組に新しい機体が加わったら、組の全員の経路を作り直す(残っている列を、新しい組で分け直す)。
+ * 機体が抜けたときは作り直さない(残りの機体は、自分の分をそのまま刈る)。毎フレーム呼ぶ
+ */
+function checkTeams(): void {
+  if (!plotting.teamwork) return
+  for (const unit of mowers) {
+    if (!unit.autoDrive || !unit.route.plan || unit.route.dirty) continue
+    const team = teamOf(unit).map((m) => m.index)
+    if (team.some((i) => !unit.route.team.includes(i))) {
+      unit.route.dirty = true
+      unit.route.follower = null
+    }
+  }
 }
 
 /** その地点の区画の番号。区画の外なら -1 */
@@ -381,7 +439,16 @@ function selectPlot(id: number): void {
 
 /** 機体が受け持つ区画を刈り終えたとき。続けて進む設定なら、まだ刈っていない空いた区画へ移る */
 function finishPlot(unit: MowerUnit): void {
-  if (unit.plot >= 0) plotting.done.add(unit.plot)
+  if (unit.plot >= 0) {
+    // 分担しているときは、組のほかの機体がまだ刈っていれば、区画はまだ刈り終えていない。自分は次の区画へ移る
+    const others = plotting.teamwork ? teamOf(unit).filter((m) => m !== unit) : []
+    if (others.length > 0) {
+      unit.finishedPlot = unit.plot
+      unit.plot = -1
+    } else {
+      plotting.done.add(unit.plot)
+    }
+  }
   unit.route.follower = null
   unit.route.dirty = true
   if (plotting.sequence) {
@@ -464,12 +531,26 @@ function refreshPathLine(): void {
 
 const formatKm = (m: number): string => `${(m / 1000).toFixed(2)} km`
 
-/** 機体の今いる所を出発点として、受け持つ区画の経路を作る */
+/**
+ * 機体の今いる所を出発点として、受け持つ区画の経路を作る。
+ * 分担して刈るときは、組の全員の経路を同じ時点の並びで作り直す(列の割り振りが食い違わないように)
+ */
 function updateRoute(unit: MowerUnit): void {
   if (zoning.dirty || !zoning.result || plotting.dirty || !plotting.result) updatePlots()
+  assignPlot(unit)
+  const team = teamOf(unit)
+  const ids = team.map((m) => m.index)
+  for (const member of team) {
+    if (member !== unit && !member.route.dirty && ids.every((i) => member.route.team.includes(i))) continue
+    planRoute(member, team)
+  }
+}
+
+/** 組(team。分担しないときはその機体だけ)の中での受け持ちで、機体の経路を作る */
+function planRoute(unit: MowerUnit, team: MowerUnit[]): void {
   const route = unit.route
   route.dirty = false
-  assignPlot(unit)
+  route.team = team.map((m) => m.index)
   const plots = plotting.result as PlotResult
   const cell = terrain.options.cell
   const mask = new Uint8Array(plots.labels.length)
@@ -488,7 +569,10 @@ function updateRoute(unit: MowerUnit): void {
       cutWidth: params.cutWidth,
       turnRadius: minTurnRadius(params) * 1.15,
       deckOffset: params.deckOffset,
-      runIn: 1
+      runIn: 1,
+      share: team.length > 1 ? { index: team.indexOf(unit), count: team.length } : undefined,
+      // 刈り終えた列と周は飛ばす(途中から作り直しても、刈った所を刈り直さない)
+      isCut: (x, z) => coverage.isCovered(x, z)
     },
     unit.state.x,
     unit.state.z,
@@ -505,7 +589,7 @@ function updateRoute(unit: MowerUnit): void {
   let cells = 0
   for (let i = 0; i < mask.length; i++) cells += mask[i]
   route.text = {
-    plot: `${unit.plot + 1} / ${plots.plots.length}(済み ${plotting.done.size})`,
+    plot: `${unit.plot + 1} / ${plots.plots.length}(済み ${plotting.done.size}${team.length > 1 ? `、${team.length} 台で分担` : ''})`,
     area: `${((cells * cell * cell) / 10000).toFixed(2)} ha`,
     lines: `${plan.sweepCount}`,
     cut: formatKm(plan.cutLength),
@@ -1026,6 +1110,22 @@ syncs.push(
     () => plotting.sequence,
     (v) => {
       plotting.sequence = v
+    }
+  ),
+  addCheck(
+    routeFields,
+    '分担して刈る',
+    '自動運転の機体が、同じ区画の往復の列を分け合って刈ります(外周の周回も順番に分けます)。オフにすると、機体ごとに別々の区画を刈ります',
+    () => plotting.teamwork,
+    (v) => {
+      plotting.teamwork = v
+      // 受け持ちを決め直す(走っている経路は、今いる所から作り直す)
+      for (const unit of mowers) {
+        unit.plot = -1
+        unit.finishedPlot = -1
+      }
+      markRoutesDirty(true)
+      refreshPlotOverlay()
     }
   ),
   routeSlider('刈る向き', '往復刈りの列の向き。0° で画面の奥行き方向', 'angleDeg', 0, 175, 5, (v) => `${v.toFixed(0)}°`),
@@ -1668,6 +1768,7 @@ function frame(now: number): void {
   else if (steps > 0) clippings.update(Math.min(simSeconds, 3 / timeSettings.fps))
   if (zoning.dirty) updateZoning()
   // 経路は、自動運転の機体と、区画と経路を表示しているときの乗っている機体の分を作る。重いので 1 フレームに 1 台まで
+  checkTeams()
   const needsRoute = mowers.find((m) => m.route.dirty && (m.autoDrive || (route.show && m === rider)))
   if (needsRoute) updateRoute(needsRoute)
   else if (plotting.dirty && route.show) updatePlots()

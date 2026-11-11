@@ -39,6 +39,27 @@ export interface PlanOptions {
   deckOffset: number
   /** 刈り始める前に、列にまっすぐ乗るための助走(m) */
   runIn: number
+  /**
+   * 同じ範囲を複数台で分担するとき。往復の列を、隣り合うまとまりで count 個に分け、index 番目だけを刈る
+   * (index は列に直交する向きの位置の順。0 が normal の負の側)。外周刈りの周回は、count 台で順番に割り振る
+   */
+  share?: { index: number; count: number }
+  /** 刈り終えた所なら true。刈り終えた列と外周の周は飛ばす(途中から計画し直しても、刈った所を刈り直さない) */
+  isCut?: (x: number, z: number) => boolean
+}
+
+/** 列や周のうち、この割合以上が刈り終えていれば、刈り終えたものとして飛ばす */
+const CUT_SKIP_RATIO = 0.9
+
+/** 点列(x, z の並び)のうち、刈り終えた点の割合 */
+function cutRatio(points: number[], isCut: (x: number, z: number) => boolean): number {
+  let cut = 0
+  let total = 0
+  for (let i = 0; i < points.length; i += 2) {
+    total++
+    if (isCut(points[i], points[i + 1])) cut++
+  }
+  return total > 0 ? cut / total : 0
 }
 
 export interface CoveragePlan {
@@ -67,6 +88,8 @@ interface Sweep {
   bx: number
   bz: number
   done: boolean
+  /** 何本目の列か(列に直交する向きの順) */
+  line: number
 }
 
 class PathBuilder {
@@ -380,7 +403,8 @@ export function planCoverage(
               az: c * normalZ + runStart * dirZ,
               bx: c * normalX + runEnd * dirX,
               bz: c * normalZ + runEnd * dirZ,
-              done: false
+              done: false,
+              line: k
             })
           }
           runStart = NaN
@@ -389,9 +413,34 @@ export function planCoverage(
     }
   }
 
+  // 刈り終えた列は飛ばす(列の上の点を 1 m おきに調べる)
+  const isCut = options.isCut
+  if (isCut) {
+    for (const sweep of sweeps) {
+      const length = Math.hypot(sweep.bx - sweep.ax, sweep.bz - sweep.az)
+      const count = Math.max(2, Math.ceil(length))
+      const points: number[] = []
+      for (let s = 0; s <= count; s++) {
+        const t = s / count
+        points.push(sweep.ax + (sweep.bx - sweep.ax) * t, sweep.az + (sweep.bz - sweep.az) * t)
+      }
+      if (cutRatio(points, isCut) >= CUT_SKIP_RATIO) sweep.done = true
+    }
+  }
+  // 分担するときは、残っている列を、隣り合うまとまりで count 個に分け、自分のまとまりだけを残す
+  const share = options.share && options.share.count > 1 ? options.share : null
+  if (share) {
+    const lines = [...new Set(sweeps.filter((s) => !s.done).map((s) => s.line))].sort((a, b) => a - b)
+    const mine = new Set(
+      lines.filter((_, i) => Math.min(Math.floor((i * share.count) / lines.length), share.count - 1) === share.index)
+    )
+    for (const sweep of sweeps) if (!mine.has(sweep.line)) sweep.done = true
+  }
+
   // 今いる所から近い端を持つ列を、順に選んで刈る
   const lead = options.deckOffset
-  for (let remaining = sweeps.length; remaining > 0; remaining--) {
+  let sweepCount = 0
+  for (let remaining = sweeps.filter((s) => !s.done).length; remaining > 0; remaining--) {
     let best: Sweep | null = null
     let bestReverse = false
     let bestDist = Infinity
@@ -415,6 +464,7 @@ export function planCoverage(
     }
     const sweep = best as Sweep
     sweep.done = true
+    sweepCount++
     const sx = bestReverse ? sweep.bx : sweep.ax
     const sz = bestReverse ? sweep.bz : sweep.az
     const ex = bestReverse ? sweep.ax : sweep.bx
@@ -432,6 +482,8 @@ export function planCoverage(
   // ---------------------------------------------- 外周刈り(内側の周から外へ)
   const labels = new Int32Array(n * n)
   for (let pass = options.headlandPasses - 1; pass >= 0; pass--) {
+    // 分担するときは、周回を順番に割り振る(3 周を 3 台なら 1 周ずつ)
+    if (share && pass % share.count !== share.index) continue
     const level = options.cutWidth / 2 + pass * spacing
     for (let i = 0; i < labels.length; i++) labels[i] = dist[i] >= level ? 1 : 0
     const loops = traceRegion(labels, n, 1)
@@ -445,6 +497,8 @@ export function planCoverage(
         }
         return perimeter >= 30
       })
+      // 刈り終えた周は飛ばす
+      .filter((loop) => !isCut || cutRatio(loop, isCut) < CUT_SKIP_RATIO)
 
     const pending = new Set(loops)
     while (pending.size > 0) {
@@ -484,7 +538,7 @@ export function planCoverage(
 
   return {
     path: { points: new Float32Array(builder.points), cut: new Uint8Array(builder.cut) },
-    sweepCount: sweeps.length,
+    sweepCount,
     cutLength: builder.cutLength,
     transitLength: builder.transitLength
   }
