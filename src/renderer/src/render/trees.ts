@@ -69,9 +69,10 @@ const LEAF_GLINT_TINT = 0.45
 const NEEDLE_GLINT_SCALE = 0.4
 /** 葉の向きを揺らす大きさ(法線に足すベクトルの長さ) */
 const LEAF_GLINT_WOBBLE = 0.45
-/** 照り返しを消していく距離(m)。遠くでは粒が画素より小さくなり、ちらつきになるため */
-const LEAF_GLINT_FADE_START = 60
-const LEAF_GLINT_FADE_END = 200
+/** 照り返しを消していく距離(m)。遠くでは光る葉が画素より小さくなり、ちらつきになるため。
+ * 葉 1 枚の形で光るので、150 m 先でも葉が数画素に写り、簡略モデル(LOD1)の木まで届く */
+const LEAF_GLINT_FADE_START = 100
+const LEAF_GLINT_FADE_END = 300
 
 // 葉の透け(表現)。逆光で木を見たとき、日が葉を透けて黄緑に明るく見えるようにする。
 // 逆光で見える葉の多くは、手前の葉の影に入っている。影を入れた光で透けを描くとほとんど光らないので、
