@@ -1,10 +1,15 @@
-// 樹木の配置。林に囲まれた草地(林の中の空き地)を作る。描画に依存しない。
-// 原点のまわりを空き地にし、その外を林にする。空き地の縁は方角によって出入りさせ、
-// 空き地の中にも数本だけ木を立てる。配置はシード値で決まり、同じ値なら同じになる。
+// 樹木の配置。描画に依存しない。配置はシード値で決まり、同じ値なら同じになる。
+// 林の置き方は 2 通り:
+//   clearing  林に囲まれた草地(林の中の空き地)。原点のまわりを空き地にし、その外を林にする。
+//             空き地の縁は方角によって出入りさせる
+//   groves    丘のあちこちに林が点在する。林の場所はノイズで決め、出発点のまわりは空けておく
+// どちらも、林の縁に低木を茂らせ、林の外にも数本だけ木を立てる。林の中は芝刈り機が入れない。
 
 import { gradientNoise } from './terrain'
 
-export interface TreeSpec {
+/** 林に囲まれた草地 */
+export interface ClearingSpec {
+  layout: 'clearing'
   /** 空き地の半径の基準(m) */
   clearingRadius: number
   /** 空き地の縁の出入りの大きさ(m) */
@@ -16,6 +21,27 @@ export interface TreeSpec {
   /** 空き地の中に立てる木の本数 */
   lone: number
 }
+
+/** 林が点在する丘陵 */
+export interface GroveSpec {
+  layout: 'groves'
+  /** 林のまとまりの大きさの目安(m)。ノイズの波長 */
+  scale: number
+  /** 林の広さの割合の目安(0〜1) */
+  cover: number
+  /** 林の木の間隔(m) */
+  spacing: number
+  /** ここまで林を置く(原点からの距離、m) */
+  outerRadius: number
+  /** 林の外に 1 本で立てる木の本数 */
+  lone: number
+  /** 1 本立ちの木を置く範囲(原点からの距離、m)。刈る範囲に収める */
+  loneRadius: number
+  /** 林を置かない所(出発点のまわりなど)。中心と半径(m) */
+  openings: { x: number; z: number; radius: number }[]
+}
+
+export type TreeSpec = ClearingSpec | GroveSpec
 
 export type TreeKind = 'broadleaf' | 'conifer' | 'shrub'
 
@@ -51,7 +77,7 @@ function random(seed: number): () => number {
 }
 
 /** (x, z) の方角での、空き地の半径(m) */
-export function clearingRadiusAt(spec: TreeSpec, seed: number, x: number, z: number): number {
+export function clearingRadiusAt(spec: ClearingSpec, seed: number, x: number, z: number): number {
   const r = Math.hypot(x, z) || 1
   // 方角だけで決まるように、単位円の上の点でノイズを読む(大きな出入りと小さな出入りを重ねる)
   const ux = x / r
@@ -61,9 +87,51 @@ export function clearingRadiusAt(spec: TreeSpec, seed: number, x: number, z: num
   return spec.clearingRadius + (wide * 1.6 + fine * 0.6) * spec.variation
 }
 
+/** 点在する林のノイズ(大きなまとまりに、小さな出入りを重ねる) */
+function groveNoise(spec: GroveSpec, seed: number, x: number, z: number): number {
+  const s = spec.scale
+  const fine = s * 0.37
+  return gradientNoise(x / s + 7, z / s + 3, seed + 601) + 0.45 * gradientNoise(x / fine + 1, z / fine + 13, seed + 607)
+}
+
+/** 林の広さの割合が cover になる、ノイズの閾値。刈る範囲(loneRadius の中)で標本を取って決める */
+const groveThresholds = new WeakMap<GroveSpec, Map<number, number>>()
+function groveThreshold(spec: GroveSpec, seed: number): number {
+  let bySeed = groveThresholds.get(spec)
+  if (!bySeed) {
+    bySeed = new Map()
+    groveThresholds.set(spec, bySeed)
+  }
+  const cached = bySeed.get(seed)
+  if (cached !== undefined) return cached
+  const values: number[] = []
+  const step = spec.loneRadius / 40
+  for (let z = -spec.loneRadius; z <= spec.loneRadius; z += step) {
+    for (let x = -spec.loneRadius; x <= spec.loneRadius; x += step) {
+      if (Math.hypot(x, z) <= spec.loneRadius) values.push(groveNoise(spec, seed, x, z))
+    }
+  }
+  values.sort((a, b) => a - b)
+  const cover = Math.min(Math.max(spec.cover, 0), 1)
+  const threshold = values[Math.min(values.length - 1, Math.floor(values.length * (1 - cover)))]
+  bySeed.set(seed, threshold)
+  return threshold
+}
+
+/**
+ * 林の縁からの深さ(m)。林の中は正、外は負。
+ * 点在する林では、ノイズの値の差を、まとまりの大きさに合わせておおよその距離に直す
+ */
+export function forestDepth(spec: TreeSpec, seed: number, x: number, z: number): number {
+  if (spec.layout === 'clearing') return Math.hypot(x, z) - clearingRadiusAt(spec, seed, x, z)
+  let depth = (groveNoise(spec, seed, x, z) - groveThreshold(spec, seed)) * spec.scale * 0.8
+  for (const o of spec.openings) depth = Math.min(depth, Math.hypot(x - o.x, z - o.z) - o.radius)
+  return depth
+}
+
 /** (x, z) が林の中か */
 export function inForest(spec: TreeSpec, seed: number, x: number, z: number): boolean {
-  return Math.hypot(x, z) > clearingRadiusAt(spec, seed, x, z)
+  return forestDepth(spec, seed, x, z) > 0
 }
 
 /** 木を並べる。avoidX、avoidZ は芝刈り機の出発点で、その近くには 1 本立ちの木を置かない */
@@ -78,7 +146,7 @@ export function generateTrees(spec: TreeSpec, seed: number, avoidX: number, avoi
     trees.push({ kind: conifer ? 'conifer' : 'broadleaf', x, z, height, spread, tone: next(), lone })
   }
 
-  // 林: マス目に 1 本ずつ、位置をずらして置く。遠くはまばらにして本数を抑える
+  // 林: マス目に 1 本ずつ、位置をずらして置く。奥や遠くはまばらにして本数を抑える
   const reach = Math.ceil(spec.outerRadius / spec.spacing)
   for (let iz = -reach; iz <= reach; iz++) {
     for (let ix = -reach; ix <= reach; ix++) {
@@ -87,17 +155,21 @@ export function generateTrees(spec: TreeSpec, seed: number, avoidX: number, avoi
       const keep = next()
       const r = Math.hypot(x, z)
       if (r > spec.outerRadius) continue
-      const edge = clearingRadiusAt(spec, seed, x, z)
-      if (r < edge + 1) continue
+      const depth = forestDepth(spec, seed, x, z)
+      if (depth < 1) continue
       // 縁から 60 m より奥は半分に間引く(外からは見えにくい)
-      if (r > edge + 60 && keep < 0.5) continue
+      if (depth > 60 && keep < 0.5) continue
+      // 点在する林では、刈る範囲より外の林も半分に間引く(遠景として見えればよい)
+      if (spec.layout === 'groves' && r > spec.loneRadius + 60 && keep < 0.5) continue
       grow(x, z, false)
     }
   }
 
   // 低木: 林の縁に茂り、林の中にもまばらに生える
   const shrubSpacing = 3.2
-  const shrubReach = Math.ceil((spec.clearingRadius + spec.variation * 2 + 50) / shrubSpacing)
+  const shrubRange =
+    spec.layout === 'clearing' ? spec.clearingRadius + spec.variation * 2 + 50 : spec.loneRadius + 60
+  const shrubReach = Math.ceil(shrubRange / shrubSpacing)
   for (let iz = -shrubReach; iz <= shrubReach; iz++) {
     for (let ix = -shrubReach; ix <= shrubReach; ix++) {
       const x = (ix + (next() - 0.5) * 0.9) * shrubSpacing
@@ -105,7 +177,7 @@ export function generateTrees(spec: TreeSpec, seed: number, avoidX: number, avoi
       const keep = next()
       const size = next()
       const tone = next()
-      const depth = Math.hypot(x, z) - clearingRadiusAt(spec, seed, x, z)
+      const depth = forestDepth(spec, seed, x, z)
       if (depth < 0.8 || depth > 45) continue
       if (keep > (depth < 9 ? 0.5 : 0.07)) continue
       const height = 1.1 + size * 1.4
@@ -113,15 +185,25 @@ export function generateTrees(spec: TreeSpec, seed: number, avoidX: number, avoi
     }
   }
 
-  // 空き地の中の 1 本立ち。出発点と、ほかの 1 本立ちから離す
+  // 林の外の 1 本立ち。林の縁と出発点と、ほかの 1 本立ちから離す
   let tries = 0
   let placed = 0
-  while (placed < spec.lone && tries++ < 200) {
+  const maxTries = spec.layout === 'clearing' ? 200 : 600
+  while (placed < spec.lone && tries++ < maxTries) {
     const angle = next() * Math.PI * 2
-    const share = 0.25 + next() * 0.45
-    const x = Math.cos(angle) * spec.clearingRadius * share
-    const z = Math.sin(angle) * spec.clearingRadius * share
-    if (Math.hypot(x, z) > clearingRadiusAt(spec, seed, x, z) - 12) continue
+    let x: number
+    let z: number
+    if (spec.layout === 'clearing') {
+      const share = 0.25 + next() * 0.45
+      x = Math.cos(angle) * spec.clearingRadius * share
+      z = Math.sin(angle) * spec.clearingRadius * share
+    } else {
+      // 円の中に均等に散らす
+      const r = spec.loneRadius * Math.sqrt(next())
+      x = Math.cos(angle) * r
+      z = Math.sin(angle) * r
+    }
+    if (forestDepth(spec, seed, x, z) > -12) continue
     if (Math.hypot(x - avoidX, z - avoidZ) < 15) continue
     if (trees.some((t) => t.lone && Math.hypot(t.x - x, t.z - z) < 18)) continue
     grow(x, z, true)
@@ -147,7 +229,7 @@ export function blockedByTrees(
     const z = origin + iz * cell
     for (let ix = 0; ix < samples; ix++) {
       const x = origin + ix * cell
-      if (Math.hypot(x, z) > clearingRadiusAt(spec, seed, x, z) - FOREST_MARGIN) {
+      if (forestDepth(spec, seed, x, z) > -FOREST_MARGIN) {
         blocked[iz * samples + ix] = 1
       }
     }
