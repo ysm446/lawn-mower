@@ -24,8 +24,12 @@ import { Atmosphere, SKY_LOOKUP_GLSL } from './atmosphere'
 
 /** 影を描く距離の上限(m)。これより遠くには影が落ちない */
 const SHADOW_DISTANCE = 220
-/** 影の段数。近くほど細かい影の地図を使う(カスケードシャドウマップ) */
+/** 影の段数の初期値。近くほど細かい影の地図を使う(カスケードシャドウマップ)。設定で変えられる */
 const SHADOW_CASCADES = 3
+/** 光から見た奥行きの範囲(m)の最小値。影を描く距離を伸ばすと、それに合わせて広げる */
+const SHADOW_LIGHT_FAR = 900
+/** 影の面の向きへのずらし(影のちらつきを抑える) */
+const SHADOW_NORMAL_BIAS = 0.04
 /**
  * 霞を、実際の大気より何倍濃く掛けるか。実際の大気では数 km 先でもほとんど霞まないが、
  * この場面は数百 m から数 km の広さなので、遠近感が出るように濃くする
@@ -266,12 +270,12 @@ export class Lighting {
       shadowMapSize: 2048,
       lightIntensity: 1,
       lightNear: 1,
-      lightFar: 900,
+      lightFar: SHADOW_LIGHT_FAR,
       // 視野の外にある高い木も影を落とせるよう、影の地図を視野より広く取る
       lightMargin: 60,
       shadowBias: -0.0002
     })
-    for (const light of this.csm.lights) light.shadow.normalBias = 0.04
+    for (const light of this.csm.lights) light.shadow.normalBias = SHADOW_NORMAL_BIAS
 
     // 霞は材質に差し込んだ計算で掛けるので、three.js の霧は使わない
     scene.add(this.hemisphere, this.sky)
@@ -350,19 +354,50 @@ export class Lighting {
     this.cloudUniforms.uCloudOffset.value.addScaledVector(CLOUD_HEADING, -CLOUD_SPEED * wind * seconds)
   }
 
-  /** 影を描く距離(m)を変える */
+  /**
+   * 影を描く距離(m)を変える。光から見た奥行きの範囲も広げる(段の影の地図は、遠い段ほど広い範囲を
+   * 受け持ち、奥行きも深くなる。範囲が足りないと、遠くの段で影が欠ける)
+   */
   setShadowDistance(distance: number): void {
     this.csm.maxFar = distance
+    this.csm.lightFar = Math.max(SHADOW_LIGHT_FAR, distance * 2 + 200)
+    for (const light of this.csm.lights) light.shadow.camera.far = this.csm.lightFar
   }
 
   /** 影の地図の一辺(画素)を変える。段ごとの地図を作り直す */
   setShadowMapSize(size: number): void {
+    // 段の数を変えて光源を作り直すときも、この大きさで作る
+    this.csm.shadowMapSize = size
     for (const light of this.csm.lights) {
       if (light.shadow.mapSize.x === size) continue
       light.shadow.mapSize.set(size, size)
       light.shadow.map?.dispose()
       light.shadow.map = null
     }
+  }
+
+  /**
+   * 影の段数(カスケードの数)を変える。段ごとの光源を作り直し、影に対応させた材質の段数の定義を書き換える
+   * (材質のシェーダーは作り直される)。CSM そのものは作り直さない。材質に差し込んだ処理が、この CSM を参照しているため
+   */
+  setShadowCascades(count: number): void {
+    // three.js の CSM には段数を変える仕組みが無いので、中の光源の作り方(_createLights)を呼ぶ
+    const csm = this.csm as CSM & { _createLights(): void }
+    if (csm.cascades === count) return
+    csm.remove()
+    for (const light of csm.lights) {
+      light.shadow.map?.dispose()
+      light.dispose()
+    }
+    csm.lights.length = 0
+    csm.cascades = count
+    csm._createLights()
+    for (const light of csm.lights) light.shadow.normalBias = SHADOW_NORMAL_BIAS
+    for (const material of csm.shaders.keys() as IterableIterator<Material>) {
+      material.defines = { ...material.defines, CSM_CASCADES: count }
+      material.needsUpdate = true
+    }
+    csm.updateFrustums()
   }
 
   /**

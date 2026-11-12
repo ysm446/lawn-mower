@@ -17,6 +17,8 @@ export interface AppSettings {
   grassDistance: number
   /** 影を描く距離(m) */
   shadowDistance: number
+  /** 影の段数(カスケードシャドウマップの段の数)。段ごとに影の地図を 1 枚使う */
+  shadowCascades: number
   /** 影の地図の一辺(画素)。大きいほど影の縁が細かい */
   shadowMapSize: number
   /** 刈りカスの粒を描くか */
@@ -36,6 +38,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showFps: true,
   grassDistance: 20,
   shadowDistance: 220,
+  shadowCascades: 3,
   shadowMapSize: 2048,
   clippings: true,
   showHint: true,

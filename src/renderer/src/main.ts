@@ -1642,7 +1642,8 @@ function applySetting(key: keyof AppSettings): void {
   else if (key === 'shadowDistance') {
     lighting.setShadowDistance(settings.shadowDistance)
     treeModels.setShadowDistance(settings.shadowDistance)
-  } else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
+  } else if (key === 'shadowCascades') lighting.setShadowCascades(settings.shadowCascades)
+  else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
   else if (key === 'clippings') {
     clippings.mesh.visible = settings.clippings
     if (!settings.clippings) clippings.clear()
@@ -1705,11 +1706,20 @@ const toggleSettings = setupSettings(
           type: 'slider',
           key: 'shadowDistance',
           label: '影を描く距離',
-          title: 'カメラからこの距離までに影を落とします。短くすると、近くの影が細かくなります',
+          title:
+            'カメラからこの距離までに影を落とします。短くすると、近くの影が細かくなります。長くするときは、影の段数も増やすと近くの影が粗くなりにくくなります',
           min: 60,
-          max: 500,
-          step: 10,
+          max: 1500,
+          step: 20,
           format: (v) => `${v.toFixed(0)} m`
+        },
+        {
+          type: 'choice',
+          key: 'shadowCascades',
+          label: '影の段数',
+          title:
+            '影を描く距離を、近くから遠くへ何段に分けて描くか(カスケードシャドウマップ)。段ごとに影の地図を 1 枚使い、近い段ほど細かい影になります。増やすと近くの影が細かくなり、段の数だけ重くなります',
+          options: [1, 2, 3, 4, 5].map((n) => ({ value: n, label: `${n}` }))
         },
         {
           type: 'choice',
@@ -2014,7 +2024,23 @@ function createProfiler(): Profiler {
             resize()
           }
         }
-      }
+      },
+      ...[
+        { cascades: 5, distance: settings.shadowDistance },
+        { cascades: 5, distance: 1000 }
+      ].map(({ cascades, distance }) => ({
+        name: `影 ${cascades} 段 ${distance} m`,
+        apply: () => {
+          lighting.setShadowCascades(cascades)
+          lighting.setShadowDistance(distance)
+          treeModels.setShadowDistance(distance)
+          return () => {
+            lighting.setShadowCascades(settings.shadowCascades)
+            lighting.setShadowDistance(settings.shadowDistance)
+            treeModels.setShadowDistance(settings.shadowDistance)
+          }
+        }
+      }))
     ],
     onDone: (report) => {
       console.warn(`[profile]\n${report}`)
