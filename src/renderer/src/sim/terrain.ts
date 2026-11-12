@@ -1,7 +1,7 @@
 // 地形。なだらかな丘陵を、シード値から手続き的に作る。描画に依存しない。
 // 単位は m。Y が上で、高さは (x, z) の関数として持つ。
 // 中央の範囲は一定間隔の格子(高さマップ)として持ち、走行と区分けはこの格子を使う。
-// 格子の外は式から直接求める(遠景の山並み用)。
+// 格子の外は式から直接求める(遠景の山並みや平野用)。
 
 /** 地形の形の調整。マップごとに変える */
 export interface TerrainShape {
@@ -9,6 +9,8 @@ export interface TerrainShape {
   hillScale: number
   /** 遠景の山並みの高さの倍率 */
   mountainScale: number
+  /** 遠くを平野にする(山並みを置かず、丘の起伏も遠くほど小さくする) */
+  plain?: boolean
 }
 
 export const DEFAULT_SHAPE: TerrainShape = { hillScale: 1, mountainScale: 1 }
@@ -96,6 +98,9 @@ export function terrainHeight(
   const relief = 0.35 + 1.5 * smoothstep(-0.45, 0.45, gradientNoise(x / 330, z / 330, seed + 977))
   hills *= shape.hillScale
   let h = hills * relief
+
+  // 平野: 刈る範囲の外から、遠くほど起伏を小さくし、地平線まで平らに近い土地が続く
+  if (shape.plain) return h * (1 - 0.85 * smoothstep(280, 1200, Math.hypot(x, z)))
 
   // 遠くは山並みにして、地平線を隠す
   const far = smoothstep(320, 1900, Math.hypot(x, z))

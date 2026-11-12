@@ -34,7 +34,7 @@ export const MAPS: MapSpec[] = [
     name: '丘陵',
     description: 'なだらかな丘が続く芝地。勾配で刈る範囲が分かれる',
     seed: 7,
-    shape: { hillScale: 1, mountainScale: 1 },
+    shape: { hillScale: 1, mountainScale: 0, plain: true },
     grass: { uncutHeight: 0.1, roughness: 0 },
     trees: null,
     startX: -21,
