@@ -60,7 +60,7 @@ const LEAF_ALPHA_TEST = 0.4
 /** 照り返しの強さ */
 const LEAF_GLINT_STRENGTH = 2
 /** 照り返しの鋭さ(大きいほど、光る葉が少なく、光り方が鋭くなる) */
-const LEAF_GLINT_SHARPNESS = 10
+const LEAF_GLINT_SHARPNESS = 8
 /** 葉ごとに照り返す向きをずらす大きさ */
 const LEAF_GLINT_SCATTER = 1.2
 /** 光の色に葉の色を混ぜる割合(0 で白、1 で葉の色をいちばん明るくした色)。葉のつやは表面の照り返しなので白に近い */
@@ -102,6 +102,7 @@ const LEAF_TRANSLUCENCY_FRAGMENT = /* glsl */ `
 
 const LEAF_GLINT_VERTEX_HEADER = /* glsl */ `
 attribute vec3 aLeafNormal;
+uniform float uLeafGlintSpeed;
 varying vec3 vLeafGlint;
 `
 
@@ -110,7 +111,7 @@ const LEAF_GLINT_VERTEX = /* glsl */ `
 {
   float glintSeed = fract(sin(dot(aLeafNormal, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 6.2832
     + windRoot.x * 0.37 + windRoot.z * 0.61;
-  float glintTime = uWindTime * (1.2 + uWindStrength);
+  float glintTime = uWindTime * (1.2 + uWindStrength) * uLeafGlintSpeed;
   vec3 glintNormal = aLeafNormal + ${LEAF_GLINT_WOBBLE.toFixed(2)} * vec3(
     sin(glintTime * 2.1 + glintSeed),
     sin(glintTime * 1.7 + glintSeed * 2.3),
@@ -269,6 +270,7 @@ export class Trees {
   private readonly leafGlint = { value: 1 }
   /** 葉の透けの強さの倍率(設定の「葉の透け」。0 で透けない)と、透けに使う太陽の向きと光 */
   private readonly leafTranslucency = { value: 1 }
+  private readonly leafGlintSpeed = { value: 0.5 }
   private readonly sunDirection = { value: new Vector3(0, 1, 0) }
   private readonly sunLight = { value: new Color(0, 0, 0) }
   private readonly lodGroups: LodGroup[] = []
@@ -367,6 +369,7 @@ export class Trees {
           const uniforms = {
             ...this.wind,
             uLeafGlint: this.leafGlint,
+            uLeafGlintSpeed: this.leafGlintSpeed,
             uLeafGlintScale: { value: kind === 'conifer' ? NEEDLE_GLINT_SCALE : 1 },
             uLeafGlintMap: { value: leafTextures[kind].glint },
             uLeafTranslucency: this.leafTranslucency,
@@ -544,6 +547,11 @@ export class Trees {
   }
 
   /** 影を描く距離(m)を変える。簡略モデルのうち、影を落とす木の範囲が変わる */
+  /** 葉のきらめきの瞬く速さ(倍) */
+  setLeafGlintSpeed(speed: number): void {
+    this.leafGlintSpeed.value = speed
+  }
+
   /** 葉の透けの強さ(0 で透けない) */
   setLeafTranslucency(strength: number): void {
     this.leafTranslucency.value = strength

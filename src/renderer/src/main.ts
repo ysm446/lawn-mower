@@ -1353,10 +1353,10 @@ function nearestMower(x: number, z: number): MowerUnit {
 }
 
 /**
- * 機体に乗る(ほかの機体に乗っていたら、乗り移る)。誰にも乗っていなかったときは、mode の視点(既定は追従)にする。
- * 乗り移るときは、今の視点のまま
+ * 機体に乗る(ほかの機体に乗っていたら、乗り移る)。誰にも乗っていなかったときは、mode を渡せばその視点にし、
+ * 渡さなければ今の視点(俯瞰)のまま、その機体を見る。乗り移るときも、今の視点のまま
  */
-function boardMower(unit: MowerUnit, mode: CameraMode = 'chase'): void {
+function boardMower(unit: MowerUnit, mode?: CameraMode): void {
   const wasFree = rider === null
   // カメラは、今の見え方から新しい機体の視点へなめらかに移す
   if (rider !== unit) rig.beginTransition()
@@ -1365,7 +1365,7 @@ function boardMower(unit: MowerUnit, mode: CameraMode = 'chase'): void {
   if (!wasFree) rig.retarget()
   // カメラが追う位置を、今の機体の位置から始める(タイムラプスで、前の機体の位置から滑ってこないように)
   Object.assign(unit.cameraTarget, unit.state)
-  if (wasFree) rig.setMode(mode)
+  if (wasFree && mode) rig.setMode(mode)
   refreshPlotOverlay()
   syncUi()
 }
@@ -1672,6 +1672,7 @@ function applySetting(key: keyof AppSettings): void {
   } else if (key === 'shadowCascades') lighting.setShadowCascades(settings.shadowCascades)
   else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
   else if (key === 'leafGlint') treeModels.setLeafGlint(settings.leafGlint)
+  else if (key === 'leafGlintSpeed') treeModels.setLeafGlintSpeed(settings.leafGlintSpeed)
   else if (key === 'treeDetailDistance' || key === 'treeImpostorDistance') {
     treeModels.setLodDistances(settings.treeDetailDistance, settings.treeImpostorDistance)
   }
@@ -1794,7 +1795,17 @@ const toggleSettings = setupSettings(
           type: 'check',
           key: 'leafGlint',
           label: '葉のきらめき',
-          title: '日の当たる木の葉が、光を照り返してキラキラ瞬きます。日陰の葉と、200 m より遠くの木は光りません'
+          title: '日の当たる木の葉が、光を照り返してキラキラ瞬きます。日陰の葉と、300 m より遠くの木は光りません'
+        },
+        {
+          type: 'slider',
+          key: 'leafGlintSpeed',
+          label: 'きらめきの速さ',
+          title: '葉のきらめきが瞬く速さ。小さくすると、ゆったり光っては消えます。風が強いほど、また草木の揺れを倍速にするほど速くなります',
+          min: 0.25,
+          max: 2,
+          step: 0.05,
+          format: (v) => `${v.toFixed(2)} 倍`
         },
         {
           type: 'slider',
