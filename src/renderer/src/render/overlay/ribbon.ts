@@ -21,6 +21,9 @@ export const OVERLAY_PALETTE = {
   coral: '#f0917e',
   violet: '#b7a5ff',
   leaf: '#a4d48c',
+  rose: '#f29ac8',
+  amber: '#f5a35c',
+  mint: '#9fe3a8',
   snow: '#e9eef6'
 } as const
 

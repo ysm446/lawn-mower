@@ -157,7 +157,7 @@ const blocked = map.trees
       terrain.origin
     )
   : undefined
-const treeModels = new Trees(treeList, terrain)
+const treeModels = new Trees(treeList, terrain, renderer)
 scene.add(treeModels.group)
 const windSettings = { strength: 1 }
 // 時間の表現。タイムラプス(コマ落ち)と、時刻で動く太陽
@@ -497,9 +497,9 @@ function finishPlot(unit: MowerUnit): void {
 
 const params = FAIRWAY_MOWER
 
-// 芝刈り機。出発点に、横に並べて置く。台数は「区画と経路」パネルで 1〜5 台に変えられる(既定は 3 台)。
-// 起動時の指定 mowers=1〜5 でも変えられる
-const MAX_MOWERS = 5
+// 芝刈り機。出発点に、横に並べて置く。台数は「区画と経路」パネルで 1〜8 台に変えられる(既定は 3 台)。
+// 起動時の指定 mowers=1〜8 でも変えられる
+const MAX_MOWERS = 8
 const DEFAULT_MOWERS = 3
 const initialMowers = Math.min(Math.max(Math.round(Number(query.get('mowers')) || DEFAULT_MOWERS), 1), MAX_MOWERS)
 /** 出発点に並べるときの、機体どうしの横の間隔(m) */
@@ -597,7 +597,10 @@ const PATH_COLORS = [
   OVERLAY_PALETTE.gold,
   OVERLAY_PALETTE.coral,
   OVERLAY_PALETTE.violet,
-  OVERLAY_PALETTE.sky
+  OVERLAY_PALETTE.sky,
+  OVERLAY_PALETTE.rose,
+  OVERLAY_PALETTE.amber,
+  OVERLAY_PALETTE.mint
 ]
 const pathLines = new Map<MowerUnit, PathLine>()
 /** 機体の経路の線(なければ作る) */
@@ -1636,8 +1639,10 @@ function applySetting(key: keyof AppSettings): void {
   else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
-  else if (key === 'shadowDistance') lighting.setShadowDistance(settings.shadowDistance)
-  else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
+  else if (key === 'shadowDistance') {
+    lighting.setShadowDistance(settings.shadowDistance)
+    treeModels.setShadowDistance(settings.shadowDistance)
+  } else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
   else if (key === 'clippings') {
     clippings.mesh.visible = settings.clippings
     if (!settings.clippings) clippings.clear()
@@ -2116,7 +2121,7 @@ function frame(now: number): void {
   const exposure = rig.exposure
   // タイムラプスでは木の揺れもコマごとに進める(1 コマごとに枝葉の形が変わり、ちらちらして見える)
   windTime = (windTime + (timeSettings.timelapse ? simSeconds : dt)) % 4096
-  treeModels.update(windTime, windSettings.strength)
+  treeModels.update(windTime, windSettings.strength, rig.camera.position)
   // 草の波も、木の揺れと同じ時刻と強さで動かす
   ground.uniforms.uWindTime.value = windTime
   ground.uniforms.uWindStrength.value = windSettings.strength
