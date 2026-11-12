@@ -7,6 +7,7 @@ interface LawnApi {
   recordingBegin(extension: string): Promise<string>
   recordingChunk(chunk: Uint8Array): Promise<void>
   recordingEnd(): Promise<string | null>
+  setWindowSize(width: number, height: number): Promise<void>
 }
 
 interface Window {

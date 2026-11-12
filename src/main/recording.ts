@@ -154,6 +154,17 @@ function setVideoSize(win: BrowserWindow, enabled: boolean): void {
   updateTitle(win)
 }
 
+// 設定のウィンドウサイズ。中身の大きさを、画面の表示倍率を掛けた見た目の大きさで合わせ、画面の作業領域の中央に置く。
+// 動画用サイズの間と録画中は、構図が変わるので受け付けない
+export function setWindowContentSize(win: BrowserWindow, width: number, height: number): void {
+  if (output || videoSize) return
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 320 || height < 180) return
+  if (win.isFullScreen()) win.setFullScreen(false)
+  if (win.isMaximized()) win.unmaximize()
+  win.setContentSize(Math.round(width), Math.round(height))
+  win.center()
+}
+
 // キー(F11)からの切り替え。録画中は何もしない
 export function toggleVideoSize(win: BrowserWindow): void {
   if (!output) setVideoSize(win, videoSize === null)

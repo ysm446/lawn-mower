@@ -32,7 +32,7 @@ import { planCoverage, type MowPattern } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
 import { Profiler } from './profiler'
-import { loadSettings, setupSettings, type AppSettings } from './settings'
+import { DEFAULT_SETTINGS, loadSettings, setupSettings, type AppSettings } from './settings'
 import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
 import { DEFAULT_PLOTS, clusterPlots, type PlotResult } from './sim/plots'
@@ -117,19 +117,8 @@ const START_Z = map.startZ
 
 const canvas = byId<HTMLCanvasElement>('view')
 
-/**
- * 描画の倍率(ウィンドウの 1 画素あたりに描く画素の数)。設定の描画解像度に収まるように縮める。
- * 画面より細かくは描かない
- */
-function renderPixelRatio(): number {
-  const screen = window.devicePixelRatio
-  const height = settings.renderHeight
-  if (height <= 0) return screen
-  return Math.min(screen, (height * 16) / 9 / window.innerWidth, height / window.innerHeight)
-}
-
 const renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' })
-renderer.setPixelRatio(renderPixelRatio())
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.pixelRatio))
 renderer.toneMapping = ACESFilmicToneMapping
 renderer.toneMappingExposure = 1
 renderer.shadowMap.enabled = true
@@ -1632,8 +1621,18 @@ if (query.get('gizmo') === '1') sunGizmo.held = true
   canvas.addEventListener('pointercancel', endSunDrag, { capture: true })
 }
 // 設定ウインドウ。セクション(タブ)ごとに項目を並べる
+/** ウィンドウサイズの選択肢(中身の高さ。幅は 16:9) */
+const WINDOW_SIZES = [1080, 900, 720]
+/** 設定のウィンドウサイズに合わせる。動画用サイズ(F11)の間と録画中は、メインプロセスの側で受け付けない */
+function applyWindowSize(): void {
+  const height = settings.windowSize
+  if (!WINDOW_SIZES.includes(height)) return
+  void window.lawnApi?.setWindowSize(Math.round((height * 16) / 9), height)
+}
+applyWindowSize()
 function applySetting(key: keyof AppSettings): void {
-  if (key === 'renderHeight') resize()
+  if (key === 'pixelRatio') resize()
+  else if (key === 'windowSize') applyWindowSize()
   else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
@@ -1665,17 +1664,22 @@ const toggleSettings = setupSettings(
         },
         {
           type: 'choice',
-          key: 'renderHeight',
-          label: '描画解像度',
-          title:
-            'この解像度に収まる大きさで描き、画面いっぱいに引き伸ばします。下げると軽くなり、少しぼやけます。ウィンドウがこれより小さいときは、ウィンドウの大きさで描きます。「画面と同じ」は画面の画素のとおりに描きます',
+          key: 'pixelRatio',
+          label: '描画の細かさ',
+          title: '高精細の画面で、どこまで細かく描くか。下げると軽くなり、少しぼやけます',
           options: [
-            { value: 0, label: '画面と同じ' },
-            { value: 1440, label: '2560 × 1440' },
-            { value: 1080, label: '1920 × 1080' },
-            { value: 900, label: '1600 × 900' },
-            { value: 720, label: '1280 × 720' }
+            { value: 1, label: '標準' },
+            { value: 1.5, label: '高' },
+            { value: 2, label: '最高' }
           ]
+        },
+        {
+          type: 'choice',
+          key: 'windowSize',
+          label: 'ウィンドウサイズ',
+          title:
+            'ウィンドウの中身(タイトルバーを除く)の大きさ。画面の表示倍率を掛けた、見た目の大きさです。選ぶとすぐに変わり、次の起動もこの大きさで開きます。小さくすると描く画素が減って軽くなります',
+          options: WINDOW_SIZES.map((height) => ({ value: height, label: `${(height * 16) / 9} × ${height}` }))
         },
         {
           type: 'slider',
@@ -1833,7 +1837,7 @@ function stepSimulation(): void {
 function resize(): void {
   const w = window.innerWidth
   const h = window.innerHeight
-  renderer.setPixelRatio(renderPixelRatio())
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.pixelRatio))
   renderer.setSize(w, h, false)
   composer.setPixelRatio(renderer.getPixelRatio())
   composer.setSize(w, h)
@@ -1951,7 +1955,7 @@ const profiler = query.get('profile') === '1' ? createProfiler() : null
 function createProfiler(): Profiler {
   // 測る間は、描画の回数と解像度の上限を外す(保存はしない)
   settings.fpsLimit = 0
-  settings.renderHeight = 0
+  settings.pixelRatio = DEFAULT_SETTINGS.pixelRatio
   resize()
   const p = new Profiler(renderer.getContext() as WebGL2RenderingContext, {
     warmup: 4,
@@ -1995,17 +1999,17 @@ function createProfiler(): Profiler {
           return () => (meterPass.enabled = true)
         }
       },
-      ...[1080, 720].map((height) => ({
-        name: `${(height * 16) / 9}×${height}`,
+      {
+        name: '描画の細かさ 標準',
         apply: () => {
-          settings.renderHeight = height
+          settings.pixelRatio = 1
           resize()
           return () => {
-            settings.renderHeight = 0
+            settings.pixelRatio = DEFAULT_SETTINGS.pixelRatio
             resize()
           }
         }
-      }))
+      }
     ],
     onDone: (report) => {
       console.warn(`[profile]\n${report}`)

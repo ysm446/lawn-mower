@@ -7,11 +7,10 @@ import { addCheck, addChoice, addSlider, byId, type Sync } from './ui'
 export interface AppSettings {
   /** 描画の回数の上限(1 秒あたり)。0 は制限なし(画面の更新に合わせる) */
   fpsLimit: number
-  /**
-   * 描画の解像度(縦の画素数。横は 16:9 でその 16/9 倍)。ウィンドウをこの大きさに収まるまで縮めて描き、
-   * 画面いっぱいに引き伸ばす。0 は画面と同じ細かさで描く
-   */
-  renderHeight: number
+  /** 描画の細かさの上限(画面の 1 画素あたりに描く画素の数の、縦横の倍率) */
+  pixelRatio: number
+  /** ウィンドウの中身の高さ(画面の表示倍率を掛けた見た目の大きさ、16:9)。起動時と選んだときに合わせる */
+  windowSize: number
   /** 左上に fps を出すか */
   showFps: boolean
   /** 芝の葉を描く距離(m)。カメラが見ている地面のまわり、この半径まで葉を描く */
@@ -32,7 +31,8 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   fpsLimit: 0,
-  renderHeight: 0,
+  pixelRatio: 2,
+  windowSize: 1080,
   showFps: true,
   grassDistance: 20,
   shadowDistance: 220,
