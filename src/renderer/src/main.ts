@@ -1284,10 +1284,10 @@ syncs.push(
 syncs.push(
   addSwitch(
     byId('speed-switch'),
-    TIME_SCALES.map((scale, i) => ({
+    TIME_SCALES.map((scale) => ({
       value: scale,
       label: `${scale}×`,
-      title: `${scale} 倍速(${i + 1})`
+      title: `${scale} 倍速`
     })),
     () => sim.timeScale,
     (v) => {
@@ -1312,7 +1312,11 @@ syncs.push(
  */
 function setView(mode: CameraMode): void {
   if (!rider && mode !== 'top') boardMower(nearestMower(rig.focusPoint.x, rig.focusPoint.z), mode)
-  else rig.setMode(mode)
+  else if (mode !== rig.mode) {
+    // 視点を変えるときも、今の見え方から新しい視点へなめらかに移す
+    rig.beginTransition()
+    rig.setMode(mode)
+  }
   syncUi()
 }
 
@@ -1336,7 +1340,11 @@ function nearestMower(x: number, z: number): MowerUnit {
  */
 function boardMower(unit: MowerUnit, mode: CameraMode = 'chase'): void {
   const wasFree = rider === null
+  // カメラは、今の見え方から新しい機体の視点へなめらかに移す
+  if (rider !== unit) rig.beginTransition()
   rider = unit
+  // 定点の視点では、据えたカメラのまま、新しい機体を見る
+  if (!wasFree) rig.retarget()
   // カメラが追う位置を、今の機体の位置から始める(タイムラプスで、前の機体の位置から滑ってこないように)
   Object.assign(unit.cameraTarget, unit.state)
   if (wasFree) rig.setMode(mode)
@@ -1347,6 +1355,7 @@ function boardMower(unit: MowerUnit, mode: CameraMode = 'chase'): void {
 /** 機体から降りて、その機体のあたりを俯瞰で見る。降りた機体は、自動運転ならそのまま刈り続ける */
 function leaveMower(): void {
   if (!rider) return
+  rig.beginTransition()
   rig.setFreeFocus(rider.state.x, rider.state.z)
   rider = null
   rig.setMode('top')
@@ -1401,6 +1410,7 @@ const toggleHelp = setupHelp([
     items: [
       { keys: ['クリック'], text: '芝刈り機に乗る。乗っている間にほかの機体をクリックすると、乗り移る' },
       { keys: ['Tab'], text: '次の機体に乗り移る' },
+      { keys: ['1', '〜', '8'], text: 'その番号の機体に乗る(乗っていれば乗り移る)' },
       { keys: ['Esc'], text: '降りて、俯瞰で全体を見る(降りた機体は、自動運転ならそのまま刈り続ける)' },
       { keys: ['左ドラッグ'], text: '誰にも乗っていないとき、見ている所を中心に回り込む(見下ろす角度も変わる)' },
       { keys: ['右ドラッグ'], text: '誰にも乗っていないとき、見る場所を地面に沿って動かす' },
@@ -1432,7 +1442,6 @@ const toggleHelp = setupHelp([
   {
     title: 'シミュレーション',
     items: [
-      { keys: ['1', '〜', '9'], text: '倍速(1、2、4、8、16、32、64、128、256 倍)' },
       { keys: ['T'], text: 'タイムラプス(コマ落ちした早送り)の入り切り' },
       { keys: ['P'], text: '自動運転の開始と停止(乗っている機体。誰にも乗っていなければ全台)' },
       { keys: ['G'], text: '区画と経路の表示と非表示' },
@@ -1826,12 +1835,14 @@ initScreenRecorder({
 })
 if (query.get('settings') === '1') toggleSettings()
 input.onPress('Slash', toggleHelp)
-TIME_SCALES.forEach((scale, i) => {
+// 数字キーで、その番号の機体に乗る(乗っていれば乗り移る)。倍速は右下の切り替えで選ぶ
+for (let i = 0; i < MAX_MOWERS; i++) {
   input.onPress(`Digit${i + 1}`, () => {
-    sim.timeScale = scale
-    syncUi()
+    if (dialogOpen()) return false
+    const unit = mowers[i]
+    if (unit && unit !== rider) boardMower(unit)
   })
-})
+}
 // 右の列のパネルの値を、前回の値に戻す(次の起動のために保存もする)。
 // 起動時の指定(動作確認用)があるときは、その値で確かめられるよう、戻しも保存もしない(マップの指定だけは例外)
 if ([...query.keys()].every((key) => key === 'map')) restorePanelValues()

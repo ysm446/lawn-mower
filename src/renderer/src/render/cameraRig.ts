@@ -1,6 +1,6 @@
 // カメラ。物理カメラの設定値(焦点距離など)を持ち、視点の切り替えを受け持つ。
 
-import { PerspectiveCamera, Spherical, Vector3 } from 'three'
+import { PerspectiveCamera, Quaternion, Spherical, Vector3 } from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import {
   DEFAULT_CAMERA_SETTINGS,
@@ -38,6 +38,23 @@ const ARM_TILT_DEGREES_PER_SECOND = 12
 const ARM_EASE_SECONDS = 0.35
 /** アームを起こせる限界。真上から見下ろす手前で止める(ラジアン。真上が 0) */
 const ARM_MIN_POLAR = 0.06
+
+// 乗る機体を変えたとき: 前のカメラの位置と向きから、新しい視点へなめらかに移る
+/** 移るのにかける時間(秒) */
+const TRANSITION_SECONDS = 2
+/** 移る途中で持ち上げる高さの上限(m)。離れた機体へ移るとき、地面すれすれを通らないように弧を描く */
+const TRANSITION_MAX_LIFT = 60
+
+// 俯瞰の置き方: 見る点から、見る向きの後ろへ TOP_BACK、上へ TOP_UP(ホイールの倍率を掛ける)
+const TOP_BACK = Math.hypot(60, 110)
+const TOP_UP = 150
+// ドローンの置き方: 見る点から、見る向きの後ろへ ORBIT_BACK
+const ORBIT_BACK = Math.hypot(38, 46)
+/** 初めて置くときの見る向き(上から見て、+z から +x へ回した角度)。これまでの置き方(北東を見下ろす)に合わせる */
+const DEFAULT_VIEW_YAW = Math.atan2(60, 110)
+
+/** 俯瞰で W / A / S / D で動かすとき、動き出しと止まるときをならす時定数(秒) */
+const PAN_EASE_SECONDS = 0.3
 
 /** 段から旋回の速さ(度/秒)を求める。段の途中(速さを変えている間)もなめらかにつなぐ */
 function orbitDegreesPerSecond(throttle: number): number {
@@ -106,7 +123,20 @@ export class CameraRig {
   private readonly freeFocus = new Vector3()
   private panInputX = 0
   private panInputY = 0
+  // キーの向きをなめらかにしたあとの値。押し始めはじわっと動き出し、離すとすっと止まる
+  private panX = 0
+  private panY = 0
   private free = false
+  // 視点を移している途中か。from は移り始めたときのカメラ、rest は移る途中で混ぜる前の、その視点本来のカメラ
+  private transition = -1
+  private readonly fromPosition = new Vector3()
+  private readonly fromQuaternion = new Quaternion()
+  private readonly restPosition = new Vector3()
+  private readonly restQuaternion = new Quaternion()
+  private blended = false
+  // 視点に入るときの見る向き(上から見た角度)。切り替える前のカメラの向きを引き継ぎ、急に反対を向かないようにする
+  private viewYaw = DEFAULT_VIEW_YAW
+  private placed = false
 
   constructor(domElement: HTMLElement) {
     this.camera.filmGauge = this.settings.sensorWidth
@@ -177,6 +207,7 @@ export class CameraRig {
 
   setMode(mode: CameraMode): void {
     this.mode = mode
+    this.keepViewYaw()
     this.settings.focalLength = MODE_FOCAL_LENGTH[mode]
     // 定点では、機体を追わずにその場に据える。左ドラッグで見回し、右ドラッグで位置を動かせる
     // (誰にも乗っていない俯瞰は、updateFree で OrbitControls を使う設定にする)
@@ -251,6 +282,9 @@ export class CameraRig {
   /** 誰にも乗っていないときの俯瞰で、見る地面の位置を決める(降りたときに、その機体のあたりを見る) */
   setFreeFocus(x: number, z: number): void {
     this.freeFocus.set(x, 0, z)
+    this.keepViewYaw()
+    this.panX = 0
+    this.panY = 0
     // 次の update で、この位置を見るようにカメラを置き直す
     this.initialized = false
   }
@@ -279,19 +313,25 @@ export class CameraRig {
       const y = terrain.heightAt(x, z) + 0.8
       const zoom = this.topZoom
       controls.target.set(x, y, z)
-      cam.position.set(x - 60 * zoom, y + 150 * zoom, z - 110 * zoom)
+      this.behind(cam.position, controls.target, TOP_BACK * zoom, TOP_UP * zoom)
     }
     const target = controls.target
+    // キーの向きをなめらかにする(押し始めと離したときに、急に動いたり止まったりしない)
+    const ease = 1 - Math.exp(-dt / PAN_EASE_SECONDS)
+    this.panX += (this.panInputX - this.panX) * ease
+    this.panY += (this.panInputY - this.panY) * ease
+    if (Math.abs(this.panX) < 1e-3 && this.panInputX === 0) this.panX = 0
+    if (Math.abs(this.panY) < 1e-3 && this.panInputY === 0) this.panY = 0
     // キーで見る場所を動かす。向きはカメラの向き(上から見た向き)に合わせ、速さは見ている距離に比例させる
-    if (this.panInputX !== 0 || this.panInputY !== 0) {
+    if (this.panX !== 0 || this.panY !== 0) {
       const view = cam.getWorldDirection(this.tmp)
       const flat = Math.hypot(view.x, view.z)
       // 真下を見ているときは、画面の上を奥とする
       const upX = flat > 1e-3 ? view.x / flat : -Math.sin(this.arm.theta)
       const upZ = flat > 1e-3 ? view.z / flat : -Math.cos(this.arm.theta)
       const speed = 0.6 * cam.position.distanceTo(target) * dt
-      const dx = (-upZ * this.panInputX + upX * this.panInputY) * speed
-      const dz = (upX * this.panInputX + upZ * this.panInputY) * speed
+      const dx = (-upZ * this.panX + upX * this.panY) * speed
+      const dz = (upX * this.panX + upZ * this.panY) * speed
       target.x += dx
       target.z += dz
       cam.position.x += dx
@@ -307,6 +347,7 @@ export class CameraRig {
     this.focus.copy(target)
     this.lastFocus.copy(this.focus)
     this.initialized = true
+    this.placed = true
   }
 
   /** 追従視点と俯瞰の距離の倍率を決める(動作確認用) */
@@ -325,10 +366,58 @@ export class CameraRig {
   }
 
   /**
+   * 今のカメラの位置と向きから、次に決まる視点へなめらかに移り始める(乗る機体を変えたとき、降りたとき)。
+   * 移っている途中で呼んだときは、その時点の見え方から移り直す
+   */
+  beginTransition(): void {
+    this.fromPosition.copy(this.camera.position)
+    this.fromQuaternion.copy(this.camera.quaternion)
+    this.transition = 0
+  }
+
+  /**
+   * 追う機体を変えたときに呼ぶ。追従と俯瞰は新しい機体の位置から決め直し(移る途中は beginTransition で混ぜる)、
+   * 定点は据えたカメラのまま新しい機体を見る。ドローンは機体との位置関係を保ったまま移る
+   */
+  retarget(): void {
+    if (this.mode !== 'orbit') this.initialized = false
+  }
+
+  /**
    * 毎フレーム呼ぶ。state は追う機体(乗っている機体)。null なら誰にも乗っておらず、
    * 俯瞰の視点で、ドラッグとキーで動かした場所を見る
    */
   update(target: VehicleState | null, dt: number, terrain: Terrain): void {
+    const cam = this.camera
+    // 前のフレームで移る途中の見え方に混ぜたときは、視点本来のカメラに戻してから進める
+    // (OrbitControls などが、混ぜた位置を元に動かさないように)
+    if (this.blended) {
+      cam.position.copy(this.restPosition)
+      cam.quaternion.copy(this.restQuaternion)
+      this.blended = false
+    }
+    this.place(target, dt, terrain)
+    if (this.transition < 0) return
+    this.transition += dt / TRANSITION_SECONDS
+    if (this.transition >= 1) {
+      this.transition = -1
+      return
+    }
+    this.restPosition.copy(cam.position)
+    this.restQuaternion.copy(cam.quaternion)
+    // 始めと終わりをゆっくりにする(smootherstep)
+    const t = this.transition
+    const k = t * t * t * (t * (t * 6 - 15) + 10)
+    const lift = Math.min(this.fromPosition.distanceTo(this.restPosition) * 0.25, TRANSITION_MAX_LIFT)
+    cam.position.lerpVectors(this.fromPosition, this.restPosition, k)
+    cam.position.y += Math.sin(Math.PI * k) * lift
+    cam.quaternion.slerpQuaternions(this.fromQuaternion, this.restQuaternion, k)
+    this.keepAboveGround(terrain)
+    this.blended = true
+  }
+
+  /** 視点ごとに、カメラの位置と向きを決める */
+  private place(target: VehicleState | null, dt: number, terrain: Terrain): void {
     const cam = this.camera
     cam.filmGauge = this.settings.sensorWidth
     cam.setFocalLength(this.settings.focalLength)
@@ -379,7 +468,8 @@ export class CameraRig {
       cam.lookAt(aheadX, terrain.heightAt(aheadX, aheadZ) + CHASE_PIVOT_HEIGHT, aheadZ)
     } else if (this.mode === 'orbit') {
       if (!this.initialized) {
-        cam.position.set(this.focus.x - 38, 26, this.focus.z - 46)
+        this.behind(cam.position, this.focus, ORBIT_BACK, 0)
+        cam.position.y = 26
         this.controls.target.copy(this.focus)
       } else {
         // 注視点の移動分だけカメラも動かし、機体を追いかける
@@ -405,7 +495,7 @@ export class CameraRig {
       this.findSight(terrain)
     } else {
       const zoom = this.topZoom
-      this.tmp.set(this.focus.x - 60 * zoom, this.focus.y + 150 * zoom, this.focus.z - 110 * zoom)
+      this.behind(this.tmp, this.focus, TOP_BACK * zoom, TOP_UP * zoom)
       if (this.initialized) cam.position.lerp(this.tmp, Math.min(1, dt * 2))
       else cam.position.copy(this.tmp)
       cam.lookAt(this.focus)
@@ -413,6 +503,22 @@ export class CameraRig {
 
     this.lastFocus.copy(this.focus)
     this.initialized = true
+    this.placed = true
+  }
+
+  /** 今のカメラの見る向き(上から見た角度)を、次に置き直すときのために覚える。まだ一度も置いていなければ初めの向きのまま */
+  private keepViewYaw(): void {
+    if (!this.placed) return
+    const cam = this.camera
+    const d = cam.getWorldDirection(this.tmp)
+    // 真下を見ているときは、画面の上の向きを見る向きとする
+    if (Math.hypot(d.x, d.z) < 1e-3) d.set(0, 1, 0).applyQuaternion(cam.quaternion)
+    this.viewYaw = Math.atan2(d.x, d.z)
+  }
+
+  /** out に、center から見る向きの後ろへ back、上へ up の位置を入れる */
+  private behind(out: Vector3, center: Vector3, back: number, up: number): void {
+    out.set(center.x - Math.sin(this.viewYaw) * back, center.y + up, center.z - Math.cos(this.viewYaw) * back)
   }
 
   private keepAboveGround(terrain: Terrain): void {

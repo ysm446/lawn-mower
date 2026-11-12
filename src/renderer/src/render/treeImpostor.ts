@@ -240,7 +240,14 @@ void impostorBasis(out vec3 right, out vec3 up, out vec3 forward, out vec2 cell)
   float size = length(rotation[1]);
   rotation /= size;
   vec3 root = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+#ifdef IMPOSTOR_SHADOW
+  // 影を描くとき: 光(正射影のカメラ)の方を向く。カメラの位置の方を向くと、影の地図のカメラは段の範囲の中央にあるので、
+  // 板が光に対して横を向き、影がほとんど落ちない。カメラの z 軸(ワールドの向き)が、光の来る向き
+  vec3 toLight = vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]);
+  vec3 toCamera = transpose(rotation) * toLight;
+#else
   vec3 toCamera = transpose(rotation) * (cameraPosition - root) / size - vec3(0.0, uImpostorCenter, 0.0);
+#endif
   forward = dot(toCamera, toCamera) > 1e-8 ? normalize(toCamera) : vec3(0.0, 0.0, 1.0);
   float horizontal = length(forward.xz);
   right = horizontal > 1e-3 ? vec3(forward.z, 0.0, -forward.x) / horizontal : vec3(1.0, 0.0, 0.0);
@@ -347,6 +354,8 @@ export function createImpostorMesh(
     alphaTest: IMPOSTOR_ALPHA_TEST,
     roughness: 0.85
   })
+  // 影の地図には、既定では裏面だけを描く(材質が表面のとき)。板は光の方へ表を向けるので、両面を描かないと影が落ちない
+  material.shadowSide = DoubleSide
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.vertexShader = shader.vertexShader
@@ -367,6 +376,7 @@ export function createImpostorMesh(
     map: atlas.albedo,
     alphaTest: IMPOSTOR_ALPHA_TEST
   })
+  depth.defines = { IMPOSTOR_SHADOW: '' }
   depth.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
     shader.vertexShader = shader.vertexShader
