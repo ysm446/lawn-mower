@@ -44,7 +44,7 @@ void main() {
 `
 
 /**
- * 画面の明るさを測る。画像を小さく縮めて読み戻し、中央に重みを置いた
+ * 画面の明るさを測る。画像を小さく縮めて(GPU を待たずに)読み戻し、中央に重みを置いた
  * 「明るさの対数の平均」を求める(対数で平均すると、空などの明るい所に引きずられにくい)。
  */
 export class MeterPass extends Pass {
@@ -72,6 +72,8 @@ export class MeterPass extends Pass {
   private readonly weights = new Float32Array(METER_WIDTH * METER_HEIGHT)
   private weightSum = 0
   private frame = 0
+  /** 読み出しの結果を待っているか */
+  private reading = false
 
   constructor() {
     super()
@@ -92,11 +94,24 @@ export class MeterPass extends Pass {
     _writeBuffer: WebGLRenderTarget,
     readBuffer: WebGLRenderTarget
   ): void {
-    if (this.frame++ % this.interval !== 0) return
+    // 前の読み出しを待っている間は、次を測らない(読み出しは 1 つずつ)
+    if (this.reading || this.frame++ % this.interval !== 0) return
     this.material.uniforms.tDiffuse.value = readBuffer.texture
     renderer.setRenderTarget(this.target)
     this.quad.render(renderer)
-    renderer.readRenderTargetPixels(this.target, 0, 0, METER_WIDTH, METER_HEIGHT, this.pixels)
+    // GPU の描画が終わるのを待たずに読み出しを頼み、結果は数フレーム後に受け取る。
+    // その場で読むと、CPU が GPU の描画が終わるまで止まる。自動露出はゆっくり追うので、遅れは目立たない
+    this.reading = true
+    renderer
+      .readRenderTargetPixelsAsync(this.target, 0, 0, METER_WIDTH, METER_HEIGHT, this.pixels)
+      .then(() => this.measure())
+      .catch(() => {
+        // 読めなかった回は飛ばす(前の値のまま)
+      })
+      .finally(() => (this.reading = false))
+  }
+
+  private measure(): void {
     let sum = 0
     for (let i = 0; i < this.weights.length; i++) {
       const v = (this.pixels[i * 4] + this.pixels[i * 4 + 1] / 255) / 255

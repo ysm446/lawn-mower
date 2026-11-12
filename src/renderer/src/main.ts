@@ -31,6 +31,7 @@ import { CoverageGrid } from './sim/coverage'
 import { planCoverage, type MowPattern } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
+import { Profiler } from './profiler'
 import { loadSettings, setupSettings, type AppSettings } from './settings'
 import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
@@ -116,8 +117,19 @@ const START_Z = map.startZ
 
 const canvas = byId<HTMLCanvasElement>('view')
 
+/**
+ * 描画の倍率(ウィンドウの 1 画素あたりに描く画素の数)。設定の描画解像度に収まるように縮める。
+ * 画面より細かくは描かない
+ */
+function renderPixelRatio(): number {
+  const screen = window.devicePixelRatio
+  const height = settings.renderHeight
+  if (height <= 0) return screen
+  return Math.min(screen, (height * 16) / 9 / window.innerWidth, height / window.innerHeight)
+}
+
 const renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' })
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.pixelRatio))
+renderer.setPixelRatio(renderPixelRatio())
 renderer.toneMapping = ACESFilmicToneMapping
 renderer.toneMappingExposure = 1
 renderer.shadowMap.enabled = true
@@ -1621,7 +1633,7 @@ if (query.get('gizmo') === '1') sunGizmo.held = true
 }
 // 設定ウインドウ。セクション(タブ)ごとに項目を並べる
 function applySetting(key: keyof AppSettings): void {
-  if (key === 'pixelRatio') resize()
+  if (key === 'renderHeight') resize()
   else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
@@ -1653,13 +1665,16 @@ const toggleSettings = setupSettings(
         },
         {
           type: 'choice',
-          key: 'pixelRatio',
-          label: '描画の細かさ',
-          title: '高精細の画面で、どこまで細かく描くか。下げると軽くなり、少しぼやけます',
+          key: 'renderHeight',
+          label: '描画解像度',
+          title:
+            'この解像度に収まる大きさで描き、画面いっぱいに引き伸ばします。下げると軽くなり、少しぼやけます。ウィンドウがこれより小さいときは、ウィンドウの大きさで描きます。「画面と同じ」は画面の画素のとおりに描きます',
           options: [
-            { value: 1, label: '標準' },
-            { value: 1.5, label: '高' },
-            { value: 2, label: '最高' }
+            { value: 0, label: '画面と同じ' },
+            { value: 1440, label: '2560 × 1440' },
+            { value: 1080, label: '1920 × 1080' },
+            { value: 900, label: '1600 × 900' },
+            { value: 720, label: '1280 × 720' }
           ]
         },
         {
@@ -1818,7 +1833,7 @@ function stepSimulation(): void {
 function resize(): void {
   const w = window.innerWidth
   const h = window.innerHeight
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.pixelRatio))
+  renderer.setPixelRatio(renderPixelRatio())
   renderer.setSize(w, h, false)
   composer.setPixelRatio(renderer.getPixelRatio())
   composer.setSize(w, h)
@@ -1931,6 +1946,91 @@ function spawnClipping(x: number, z: number, vx: number, vy: number, vz: number)
   clippings.spawn(x, terrain.heightAt(x, z) + 0.1 + Math.random() * 0.1, z, vx, vy, vz)
 }
 
+// 動作確認用: ?profile=1 で、どこが重いかを測ってログに出し、終わったら閉じる(profiler.ts)
+const profiler = query.get('profile') === '1' ? createProfiler() : null
+function createProfiler(): Profiler {
+  // 測る間は、描画の回数と解像度の上限を外す(保存はしない)
+  settings.fpsLimit = 0
+  settings.renderHeight = 0
+  resize()
+  const p = new Profiler(renderer.getContext() as WebGL2RenderingContext, {
+    warmup: 4,
+    settle: 1.5,
+    measure: 4,
+    variants: [
+      { name: '基準', apply: () => () => {} },
+      {
+        name: '影の更新を止める',
+        apply: () => {
+          renderer.shadowMap.autoUpdate = false
+          return () => (renderer.shadowMap.autoUpdate = true)
+        }
+      },
+      {
+        name: '芝の葉なし',
+        apply: () => {
+          bladeSettings.show = false
+          return () => (bladeSettings.show = true)
+        }
+      },
+      {
+        name: '木なし',
+        apply: () => {
+          treeModels.group.visible = false
+          return () => (treeModels.group.visible = true)
+        }
+      },
+      {
+        name: '被写界深度なし',
+        apply: () => {
+          const before = rig.settings.depthOfField
+          rig.settings.depthOfField = false
+          return () => (rig.settings.depthOfField = before)
+        }
+      },
+      {
+        name: '測光なし',
+        apply: () => {
+          meterPass.enabled = false
+          return () => (meterPass.enabled = true)
+        }
+      },
+      ...[1080, 720].map((height) => ({
+        name: `${(height * 16) / 9}×${height}`,
+        apply: () => {
+          settings.renderHeight = height
+          resize()
+          return () => {
+            settings.renderHeight = 0
+            resize()
+          }
+        }
+      }))
+    ],
+    onDone: (report) => {
+      console.warn(`[profile]\n${report}`)
+      setTimeout(() => window.close(), 500)
+    }
+  })
+  // 後処理の段ごとに区間を分ける。影の地図を描く所は、場面の描画の中から切り出す
+  const passNames = ['scene', 'meter', 'dof', 'output']
+  composer.passes.forEach((pass, i) => {
+    const render = pass.render.bind(pass)
+    pass.render = (...args) => {
+      p.begin(passNames[i] ?? `pass${i}`)
+      render(...args)
+    }
+  })
+  const shadowMap = renderer.shadowMap as unknown as { render: (...args: unknown[]) => void }
+  const renderShadows = shadowMap.render.bind(shadowMap)
+  shadowMap.render = (...args) => {
+    p.begin('shadow')
+    renderShadows(...args)
+    p.begin('scene')
+  }
+  return p
+}
+
 let last = performance.now()
 function frame(now: number): void {
   requestAnimationFrame(frame)
@@ -1940,6 +2040,7 @@ function frame(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1)
   last = now
   const workStart = performance.now()
+  profiler?.begin('sim')
 
   if (timeSettings.timelapse) {
     // タイムラプス: 画面は毎回描くが、時間は 1 コマぶんためてからまとめて進める。
@@ -1985,6 +2086,7 @@ function frame(now: number): void {
   // タイムラプスでは、粒もコマごとに進める
   if (!timeSettings.timelapse) clippings.update(dt * Math.min(sim.timeScale, 3))
   else if (steps > 0) clippings.update(Math.min(simSeconds, 3 / timeSettings.fps))
+  profiler?.begin('route')
   if (zoning.dirty) updateZoning()
   // 経路は、自動運転の機体と、区画と経路を表示しているときの乗っている機体の分を作る。重いので 1 フレームに 1 台まで
   checkTeams()
@@ -1992,6 +2094,7 @@ function frame(now: number): void {
   if (needsRoute) updateRoute(needsRoute)
   else if (plotting.dirty && route.show) updatePlots()
 
+  profiler?.begin('update')
   for (const unit of mowers) {
     unit.model.sync(unit.state, simSeconds, terrain)
     unit.followCamera(dt, timeSettings.timelapse)
@@ -2026,7 +2129,9 @@ function frame(now: number): void {
     const at = rider ? rider.state : { x: rig.focusPoint.x, z: rig.focusPoint.z, heading: 0 }
     normalPreview.update(renderer, at.x, at.z, at.heading, view.x, view.z)
   }
+  profiler?.begin('lighting')
   lighting.update(renderer, exposure, rig.camera.position)
+  profiler?.begin('update')
   // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
   sunGizmo.update(
     dt,
@@ -2060,6 +2165,7 @@ function frame(now: number): void {
     far: rig.camera.far
   })
   composer.render()
+  profiler?.begin('readouts')
 
   // 自動露出: 測った明るさが標準の明るさになる露出へ、少しずつ寄せる
   if (s.autoExposure && meterPass.log2Average !== null) {
@@ -2078,5 +2184,6 @@ function frame(now: number): void {
     syncUi()
   }
   updateReadouts(dt, performance.now() - workStart)
+  profiler?.frame(dt)
 }
 requestAnimationFrame(frame)
