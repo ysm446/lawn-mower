@@ -31,7 +31,7 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 import treesUrl from '../assets/models/trees.glb?url'
 import { gradientNoise, type Terrain } from '../sim/terrain'
 import type { Tree, TreeKind } from '../sim/trees'
-import { broadleafTexture, needleTexture } from './leafTexture'
+import { broadleafTexture, needleTexture, type LeafTextures } from './leafTexture'
 import { buildImpostorAtlas, createImpostorMesh } from './treeImpostor'
 
 /** カメラからこの距離(水平、m)より近い木は、細かいモデル(LOD0)で描く(初期値。設定で変える) */
@@ -54,19 +54,19 @@ const MODELS: Record<TreeKind, { height: number; variants: number }> = {
 const LEAF_ALPHA_TEST = 0.4
 
 // 葉のきらめき(表現としての照り返し)。明るさや陰影は丸めた法線で決めたまま、太陽の照り返しだけを
-// 葉 1 枚ずつの向き(aLeafNormal)で足す。向きは葉ごとにずれた周期で揺らすので、照り返す葉が次々に入れ替わって瞬く
+// 葉の板の向き(aLeafNormal)で足す。向きは板ごとにずれた周期で揺らすので、照り返す葉が次々に入れ替わって瞬く。
+// 板に描いた葉 1 枚ずつで照り返す向きをずらす(葉ごとの乱数は、きらめき用の隠しテクスチャ。leafTexture.ts)ので、
+// 光るときは葉 1 枚の形のまま光る
 /** 照り返しの強さ */
-const LEAF_GLINT_STRENGTH = 6
-/** 照り返しの鋭さ(大きいほど、光る点が少なくなる) */
-const LEAF_GLINT_SHARPNESS = 24
-/** 葉の絵(0〜1)を、一辺で何マスに分けるか。マスごとに光の点を 1 つ置く */
-const LEAF_GLINT_CELLS = 6
-/** 光の点の半径(マスの一辺に対する割合) */
-const LEAF_GLINT_SPOT = 0.3
-/** マスごとに照り返す向きをずらす大きさ */
+const LEAF_GLINT_STRENGTH = 2
+/** 照り返しの鋭さ(大きいほど、光る葉が少なく、光り方が鋭くなる) */
+const LEAF_GLINT_SHARPNESS = 10
+/** 葉ごとに照り返す向きをずらす大きさ */
 const LEAF_GLINT_SCATTER = 1.2
-/** 光の色に葉の色を混ぜる割合(0 で白、1 で葉の色をいちばん明るくした色) */
-const LEAF_GLINT_TINT = 0.75
+/** 光の色に葉の色を混ぜる割合(0 で白、1 で葉の色をいちばん明るくした色)。葉のつやは表面の照り返しなので白に近い */
+const LEAF_GLINT_TINT = 0.45
+/** 針葉樹のきらめきの強さ(広葉樹に対する割合)。針葉は細く、光ると筋のちらつきになりやすい */
+const NEEDLE_GLINT_SCALE = 0.4
 /** 葉の向きを揺らす大きさ(法線に足すベクトルの長さ) */
 const LEAF_GLINT_WOBBLE = 0.45
 /** 照り返しを消していく距離(m)。遠くでは粒が画素より小さくなり、ちらつきになるため */
@@ -125,6 +125,8 @@ const LEAF_GLINT_VERTEX = /* glsl */ `
 /** lights_physical_pars_fragment のあとに置き、太陽などの直接光を受けるたびに、葉の照り返しを足す */
 const LEAF_GLINT_FRAGMENT = /* glsl */ `
 uniform float uLeafGlint;
+uniform float uLeafGlintScale;
+uniform sampler2D uLeafGlintMap;
 uniform float uLeafTranslucency;
 uniform vec3 uSunDirection;
 uniform vec3 uSunLight;
@@ -137,18 +139,14 @@ void RE_Direct_Leaf(const in IncidentLight directLight, const in vec3 geometryPo
   if (uLeafGlint <= 0.0) return;
   float fade = 1.0 - smoothstep(${LEAF_GLINT_FADE_START.toFixed(1)}, ${LEAF_GLINT_FADE_END.toFixed(1)}, length(geometryPosition));
   if (fade <= 0.0) return;
-  // 葉の絵をマス目に分け、マスごとに小さな光の点を 1 つ置く。点の位置と、照り返す向きのずれはマスごとに変える
-  vec2 glintUv = vMapUv * ${LEAF_GLINT_CELLS.toFixed(1)};
-  vec2 glintCell = floor(glintUv);
-  vec3 glintRandom = fract(sin(vec3(
-    dot(glintCell, vec2(127.1, 311.7)),
-    dot(glintCell, vec2(269.5, 183.3)),
-    dot(glintCell, vec2(419.2, 371.9))
-  )) * 43758.5453);
-  float spot = smoothstep(${LEAF_GLINT_SPOT.toFixed(2)}, 0.0, length(fract(glintUv) - (0.25 + 0.5 * glintRandom.xy)));
+  // 板に描いた葉 1 枚ずつの乱数(R、G)と、葉のある所(B)。縁では 3 つとも同じ割合で小さくなるので、B で割って戻す
+  vec3 glintLeaf = texture2D(uLeafGlintMap, vMapUv).rgb;
+  float spot = smoothstep(0.3, 0.8, glintLeaf.b);
   if (spot <= 0.0) return;
-  // 両面の板なので、裏から見ているときは向きを返す
-  vec3 n = normalize(normalize(vLeafGlint) * (gl_FrontFacing ? 1.0 : -1.0) + (glintRandom - 0.5) * ${LEAF_GLINT_SCATTER.toFixed(2)});
+  vec2 glintRandom = glintLeaf.rg / max(glintLeaf.b, 1e-3) - 0.5;
+  // 両面の板なので、裏から見ているときは向きを返す。葉ごとに、照り返す向きをずらす
+  vec3 n = normalize(normalize(vLeafGlint) * (gl_FrontFacing ? 1.0 : -1.0)
+    + vec3(glintRandom, glintRandom.x * glintRandom.y * 2.0) * ${LEAF_GLINT_SCATTER.toFixed(2)});
   float nl = dot(n, directLight.direction);
   if (nl <= 0.0) return;
   vec3 h = normalize(directLight.direction + geometryViewDir);
@@ -157,7 +155,7 @@ void RE_Direct_Leaf(const in IncidentLight directLight, const in vec3 geometryPo
   vec3 leafHue = material.diffuseColor / max(max(material.diffuseColor.r, max(material.diffuseColor.g, material.diffuseColor.b)), 1e-3);
   vec3 glintColor = mix(vec3(1.0), leafHue, ${LEAF_GLINT_TINT.toFixed(2)});
   // directLight.color は影で暗くなった後の光なので、影の中の葉は光らない
-  reflectedLight.directSpecular += directLight.color * glintColor * (glint * spot * nl * fade * uLeafGlint * ${LEAF_GLINT_STRENGTH.toFixed(1)});
+  reflectedLight.directSpecular += directLight.color * glintColor * (glint * spot * nl * fade * uLeafGlint * uLeafGlintScale * ${LEAF_GLINT_STRENGTH.toFixed(1)});
 }
 #undef RE_Direct
 #define RE_Direct RE_Direct_Leaf
@@ -340,10 +338,15 @@ export class Trees {
     new GLTFLoader().load(
       treesUrl,
       (gltf) => {
-        const textures: Record<TreeKind, Texture> = {
+        const leafTextures: Record<TreeKind, LeafTextures> = {
           broadleaf: broadleafTexture(),
           conifer: needleTexture(),
           shrub: broadleafTexture()
+        }
+        const textures: Record<TreeKind, Texture> = {
+          broadleaf: leafTextures.broadleaf.map,
+          conifer: leafTextures.conifer.map,
+          shrub: leafTextures.shrub.map
         }
         const barkColor = new Color(0x2c2118)
         // 樹種とモデルの組ごとに、材質とジオメトリを用意する
@@ -363,6 +366,8 @@ export class Trees {
           const uniforms = {
             ...this.wind,
             uLeafGlint: this.leafGlint,
+            uLeafGlintScale: { value: kind === 'conifer' ? NEEDLE_GLINT_SCALE : 1 },
+            uLeafGlintMap: { value: leafTextures[kind].glint },
             uLeafTranslucency: this.leafTranslucency,
             uSunDirection: this.sunDirection,
             uSunLight: this.sunLight,

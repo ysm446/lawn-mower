@@ -547,6 +547,21 @@ mowers.forEach((unit, i) => {
   const pose = startPose(i)
   unit.reset(pose.x, pose.z, pose.heading)
 })
+// neartree=距離(m) で、1 号機を出発点にいちばん近い広葉樹の手前に、木の方を向けて置く(動作確認用。木を近くで見る)
+const queryNearTree = Number(query.get('neartree'))
+if (queryNearTree > 0 && mowers.length > 0) {
+  let best: (typeof treeList)[number] | null = null
+  for (const tree of treeList) {
+    if (tree.kind !== 'broadleaf') continue
+    if (!best || Math.hypot(tree.x - START_X, tree.z - START_Z) < Math.hypot(best.x - START_X, best.z - START_Z)) best = tree
+  }
+  if (best) {
+    const heading = Math.atan2(best.x - START_X, best.z - START_Z)
+    const x = best.x - Math.sin(heading) * queryNearTree
+    const z = best.z - Math.cos(heading) * queryNearTree
+    mowers[0].reset(x, z, heading)
+  }
+}
 
 const coverage = new CoverageGrid(FIELD_ORIGIN, FIELD_ORIGIN, FIELD_SIZE, FIELD_SIZE, 0.5)
 
@@ -747,6 +762,9 @@ if (queryZoom > 0) rig.setZoom(queryZoom)
 if (query.get('ui') === '0') document.body.classList.add('minimal-ui')
 // 被写界深度を切って始める(動作確認用)
 if (query.get('dof') === '0') rig.settings.depthOfField = false
+// 焦点距離(mm)を指定して始める(動作確認用。遠くの物を寄って撮る)
+const queryFocal = Number(query.get('focal'))
+if (queryFocal > 0) rig.settings.focalLength = queryFocal
 // ------------------------------------------------ UI
 
 const syncs: Sync[] = []
