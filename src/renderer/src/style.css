@@ -171,6 +171,7 @@ button:active:not(:disabled) {
   color: var(--text-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  white-space: pre;
   background: var(--panel);
   border-radius: 6px;
 }

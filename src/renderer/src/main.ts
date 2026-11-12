@@ -1703,7 +1703,7 @@ const toggleSettings = setupSettings(
     {
       title: '表示',
       items: [
-        { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数を出します' },
+        { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数と、1 フレームの処理にかかった時間を出します' },
         { type: 'check', key: 'showHint', label: '操作の案内を表示', title: '画面の上に、操作の案内を出します' },
         { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' }
       ]
@@ -1837,10 +1837,13 @@ function formatTime(seconds: number): string {
 }
 
 let fps = 60
+// 1 フレームの処理にかかった時間(ミリ秒)。描画の間隔ではなく、frame() の中で使った時間
+let frameMs = 0
 const logFps = query.get('log') === '1'
 let logTimer = 0
-function updateReadouts(dt: number): void {
+function updateReadouts(dt: number, workMs: number): void {
   if (dt > 0) fps += (1 / dt - fps) * 0.05
+  frameMs += (workMs - frameMs) * 0.05
   const s = rig.settings
   // 機体ごとの値は、乗っている機体のもの。刈った面積は全台の合計
   const unit = rider
@@ -1870,9 +1873,9 @@ function updateReadouts(dt: number): void {
   // 動作確認用: ?log=1 で、描画の速さをログに出す
   if (logFps && (logTimer += dt) > 2) {
     logTimer = 0
-    console.warn(`fps ${fps.toFixed(0)}`)
+    console.warn(`fps ${fps.toFixed(0)}  ${frameMs.toFixed(1)} ms`)
   }
-  const fpsText = `${fps.toFixed(0)} fps`
+  const fpsText = `${fps.toFixed(0)} fps  ${frameMs.toFixed(1)} ms`
   if (fpsCounter.textContent !== fpsText) fpsCounter.textContent = fpsText
 }
 
@@ -1936,6 +1939,7 @@ function frame(now: number): void {
   if (settings.fpsLimit > 0 && now - last < 1000 / settings.fpsLimit - 1.5) return
   const dt = Math.min((now - last) / 1000, 0.1)
   last = now
+  const workStart = performance.now()
 
   if (timeSettings.timelapse) {
     // タイムラプス: 画面は毎回描くが、時間は 1 コマぶんためてからまとめて進める。
@@ -2073,6 +2077,6 @@ function frame(now: number): void {
     autoSyncTimer = 0
     syncUi()
   }
-  updateReadouts(dt)
+  updateReadouts(dt, performance.now() - workStart)
 }
 requestAnimationFrame(frame)
