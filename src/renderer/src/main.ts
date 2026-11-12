@@ -1370,13 +1370,13 @@ function boardMower(unit: MowerUnit, mode?: CameraMode): void {
   syncUi()
 }
 
-/** 機体から降りて、その機体のあたりを俯瞰で見る。降りた機体は、自動運転ならそのまま刈り続ける */
+/** 機体から降りて、カメラをその場に止める(誰にも乗っていない俯瞰になる)。降りた機体は、自動運転ならそのまま刈り続ける */
 function leaveMower(): void {
   if (!rider) return
-  rig.beginTransition()
-  rig.setFreeFocus(rider.state.x, rider.state.z)
+  // カメラは、どの視点からでもその場で止める(その位置と向きのまま、誰にも乗っていない俯瞰になる)
+  const { x, z } = rider.state
+  rig.stopHere(terrain, new Vector3(x, terrain.heightAt(x, z), z))
   rider = null
-  rig.setMode('top')
   refreshPlotOverlay()
   syncUi()
 }
@@ -1432,7 +1432,7 @@ const toggleHelp = setupHelp([
       { keys: ['Esc'], text: '降りて、俯瞰で全体を見る(降りた機体は、自動運転ならそのまま刈り続ける)' },
       { keys: ['左ドラッグ'], text: '誰にも乗っていないとき、見ている所を中心に回り込む(見下ろす角度も変わる)' },
       { keys: ['右ドラッグ'], text: '誰にも乗っていないとき、見る場所を地面に沿って動かす' },
-      { keys: ['W', 'A', 'S', 'D'], text: '誰にも乗っていないとき、見る場所を動かす(カメラの向きに合わせる。矢印キーも使える)' },
+      { keys: ['↑', '←', '↓', '→'], text: '誰にも乗っていないとき、見る場所を動かす(カメラの向きに合わせる)' },
       { keys: ['ホイール'], text: '誰にも乗っていないとき、寄る、引く' }
     ]
   },
@@ -1451,8 +1451,8 @@ const toggleHelp = setupHelp([
     items: [
       { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰、定点)' },
       { keys: ['右ドラッグ'], text: '定点の視点で、カメラの位置を動かす' },
-      { keys: ['W', 'A', 'S', 'D'], text: 'ドローンと定点の視点で、カメラを回す(A / D で左右、W / S で傾き)。運転は矢印キー' },
-      { keys: ['Q', 'E'], text: 'ドローンと定点の視点で、自動の旋回。押すたびに速さが 1 段変わる(E が右回り、5 段まで)' },
+      { keys: ['W', 'A', 'S', 'D'], text: 'ドローン、定点、俯瞰の視点で、カメラを回す(A / D で左右、W / S で傾き)。運転は矢印キー' },
+      { keys: ['Q', 'E'], text: 'ドローン、定点、俯瞰の視点で、自動の旋回。押すたびに速さが 1 段変わる(E が右回り、5 段まで)' },
       { keys: ['左ドラッグ'], text: '機体を中心に回り込む(追従視点では、離して 2 秒で背後に戻る)' },
       { keys: ['ホイール'], text: 'カメラを近づける、離す(画角は変わらない)' }
     ]
@@ -1575,24 +1575,25 @@ function mowerAtScreen(clientX: number, clientY: number): MowerUnit | null {
     }
   })
 }
-// ドローンと定点の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
+// ドローン、定点、俯瞰の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
 input.onPress('KeyE', () => rig.stepOrbit(1))
 input.onPress('KeyQ', () => rig.stepOrbit(-1))
 
-// 上中央の案内。ドローンと定点の視点では、その視点の操作と、自動の旋回の様子を出す
+// 上中央の案内。ドローン、定点、俯瞰の視点では、その視点の操作と、自動の旋回の様子を出す
 const viewHint = byId('view-hint')
 const viewHintText = viewHint.textContent ?? ''
 function updateViewHint(): void {
   let text = viewHintText
+  const level = rig.orbitLevel
+  const orbiting = `旋回中 ${level > 0 ? '右回り' : '左回り'} 速さ ${Math.abs(level)} / ${ORBIT_LEVELS}(Q / E で速さと向き、W / A / S / D で回転と傾き)`
   if (!rider) {
-    text = '俯瞰: 芝刈り機をクリックで乗る。左ドラッグで回る、右ドラッグか W / A / S / D で動かす、ホイールで寄る、P で全台の自動運転'
-  } else if (rig.armControls) {
-    const level = rig.orbitLevel
-    const view = rig.mode === 'fixed' ? '定点' : 'ドローン'
     text =
       level === 0
-        ? `${view}の視点: W / A / S / D でカメラを回す、Q / E で自動の旋回、矢印キーで運転`
-        : `旋回中 ${level > 0 ? '右回り' : '左回り'} 速さ ${Math.abs(level)} / ${ORBIT_LEVELS}(Q / E で速さと向き、W / A / S / D で回転と傾き)`
+        ? '俯瞰: 芝刈り機をクリックで乗る。W / A / S / D で回す、Q / E で自動の旋回、右ドラッグか矢印キーで動かす、ホイールで寄る、P で全台の自動運転'
+        : orbiting
+  } else if (rig.armControls) {
+    const view = rig.mode === 'fixed' ? '定点' : rig.mode === 'top' ? '俯瞰' : 'ドローン'
+    text = level === 0 ? `${view}の視点: W / A / S / D でカメラを回す、Q / E で自動の旋回、矢印キーで運転` : orbiting
   } else {
     text = `${rider.name}: W / S で前後、A / D で操舵、Space で刈刃、C で視点、Tab で乗り移る、Esc で降りる、? で操作の一覧`
   }
@@ -1927,7 +1928,7 @@ syncUi()
 // ------------------------------------------------ シミュレーション
 
 function stepSimulation(): void {
-  // 手で運転するのは、乗っている機体だけ。ドローンと定点の視点では、W / A / S / D はカメラを回すのに使い、運転は矢印キーで行う
+  // 手で運転するのは、乗っている機体だけ。ドローン、定点、俯瞰の視点では、W / A / S / D はカメラを回すのに使い、運転は矢印キーで行う
   const manual = rider && !rider.autoDrive ? input.read(!rig.armControls) : IDLE_INPUT
   const ctx: StepContext = {
     terrain,
@@ -2235,11 +2236,11 @@ function frame(now: number): void {
     unit.model.sync(unit.state, simSeconds, terrain)
     unit.followCamera(dt, timeSettings.timelapse)
   }
-  // ドローンと定点の視点では W / A / S / D でカメラを回す。誰にも乗っていない俯瞰では、W / A / S / D と矢印キーで見る場所を動かす
-  if (rider && rig.armControls) rig.setArmInput(input.axis(['KeyD'], ['KeyA']), input.axis(['KeyW'], ['KeyS']))
+  // ドローン、定点、俯瞰の視点では W / A / S / D でカメラを回す。誰にも乗っていない俯瞰では、矢印キーで見る場所を動かす
+  if (rig.armControls) rig.setArmInput(input.axis(['KeyD'], ['KeyA']), input.axis(['KeyW'], ['KeyS']))
   else rig.setArmInput(0, 0)
   if (!rider) {
-    rig.setPanInput(input.axis(['KeyD', 'ArrowRight'], ['KeyA', 'ArrowLeft']), input.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']))
+    rig.setPanInput(input.axis(['ArrowRight'], ['ArrowLeft']), input.axis(['ArrowUp'], ['ArrowDown']))
   } else {
     rig.setPanInput(0, 0)
   }
