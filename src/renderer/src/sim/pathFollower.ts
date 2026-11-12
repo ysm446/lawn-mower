@@ -22,12 +22,21 @@ export interface FollowerOptions {
   transitThrottle: number
   /** 最寄りの点を探す範囲(今の位置から先の区間数) */
   searchWindow: number
+  /** カーブで許す横方向の加速度(m/s²)。曲がり具合からその点の速度の上限を決める */
+  lateralAccel: number
+  /** 曲がり具合を測る幅(前後それぞれ、m)。点の並びの細かな揺れや角を均す */
+  curveWindow: number
+  /** カーブの手前で減速するときに使う減速度の割合(機種の brake に対して)。余裕を残す */
+  curveBrake: number
 }
 
 export const DEFAULT_FOLLOWER: FollowerOptions = {
   lookahead: 2.2,
   transitThrottle: 0.6,
-  searchWindow: 40
+  searchWindow: 40,
+  lateralAccel: 1.5,
+  curveWindow: 1,
+  curveBrake: 0.6
 }
 
 /** 最寄りの点を探す範囲(今の位置から先の道のり、m) */
@@ -46,6 +55,8 @@ export class PathFollower {
   /** 経路の始点からの道のり(m) */
   travelled = 0
   readonly totalLength: number
+  /** 点ごとの速度の上限(m/s)。カーブの曲がり具合と、その手前で減速が間に合うことから決める */
+  readonly speedLimit: Float32Array
   private readonly cumulative: Float32Array
   private readonly count: number
 
@@ -62,6 +73,64 @@ export class PathFollower {
         this.cumulative[i - 1] + Math.hypot(p[i * 2] - p[i * 2 - 2], p[i * 2 + 1] - p[i * 2 - 1])
     }
     this.totalLength = this.count > 0 ? this.cumulative[this.count - 1] : 0
+    this.speedLimit = this.buildSpeedLimit()
+  }
+
+  /**
+   * 点ごとの速度の上限を作る。
+   * 1. 前後 curveWindow の点を結んだ 2 本の向きの差を、その間の道のりで割って曲がり具合(1 / 半径)にし、
+   *    横方向の加速度が lateralAccel を超えない速さ √(a × 半径) を上限にする。
+   *    半径は最小旋回半径より小さくはしない(それより急な角も、最小旋回半径で回る)。
+   * 2. 終点の側から始点の側へたどり、v² ≤ v次² + 2 × 減速度 × 距離 で上限を手前へ伝える。
+   *    これで、カーブに入る前に減速が間に合う。
+   */
+  private buildSpeedLimit(): Float32Array {
+    const p = this.path.points
+    const n = this.count
+    const c = this.cumulative
+    const { maxSpeed, wheelbase, maxSteer, brake } = this.params
+    const { lateralAccel, curveWindow, curveBrake } = this.options
+    const maxCurvature = Math.tan(maxSteer) / wheelbase
+    const limit = new Float32Array(n).fill(maxSpeed)
+    let back = 0
+    let ahead = 0
+    for (let i = 0; i < n; i++) {
+      while (back < i && c[i] - c[back + 1] >= curveWindow) back++
+      if (ahead < i) ahead = i
+      while (ahead < n - 1 && c[ahead] - c[i] < curveWindow) ahead++
+      const l1 = c[i] - c[back]
+      const l2 = c[ahead] - c[i]
+      if (l1 < 1e-3 || l2 < 1e-3) continue
+      const h1 = Math.atan2(p[i * 2] - p[back * 2], p[i * 2 + 1] - p[back * 2 + 1])
+      const h2 = Math.atan2(p[ahead * 2] - p[i * 2], p[ahead * 2 + 1] - p[i * 2 + 1])
+      const curvature = Math.min(Math.abs(wrapAngle(h2 - h1)) / ((l1 + l2) / 2), maxCurvature)
+      if (curvature > 1e-6) limit[i] = Math.min(maxSpeed, Math.sqrt(lateralAccel / curvature))
+    }
+    const decel = brake * curveBrake
+    for (let i = n - 2; i >= 0; i--) {
+      const reach = Math.sqrt(limit[i + 1] * limit[i + 1] + 2 * decel * (c[i + 1] - c[i]))
+      if (reach < limit[i]) limit[i] = reach
+    }
+    return limit
+  }
+
+  /** 道のり s の所の速度の上限(m/s) */
+  speedLimitAt(s: number): number {
+    const c = this.cumulative
+    const n = this.count
+    if (n === 0) return 0
+    if (s <= 0) return this.speedLimit[0]
+    if (s >= this.totalLength) return this.speedLimit[n - 1]
+    let lo = 0
+    let hi = n - 1
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1
+      if (c[mid] <= s) lo = mid
+      else hi = mid
+    }
+    const len = c[hi] - c[lo]
+    const t = len > 0 ? (s - c[lo]) / len : 0
+    return this.speedLimit[lo] + (this.speedLimit[hi] - this.speedLimit[lo]) * t
   }
 
   /** 進み具合(0〜1) */
@@ -120,9 +189,14 @@ export class PathFollower {
     const steer = Math.min(Math.max(steerAngle / this.params.maxSteer, -1), 1)
 
     const cutting = this.path.cut[bestSegment] === 1
-    // 大きく切っているときと、終点の手前では速度を落とす
+    // カーブの手前から速度を落とす(上限の表は前もって作ってある)。
+    // 目標点が先にあるので、機体はカーブの少し手前から曲がり始める。その分だけ先の上限を見る
     let throttle = cutting ? 1 : this.options.transitThrottle
-    throttle *= 1 - 0.45 * Math.abs(steer)
+    const curveLimit = this.speedLimitAt(this.travelled + this.options.lookahead * 0.5) / this.params.maxSpeed
+    throttle = Math.min(throttle, curveLimit)
+    // 経路から外れて大きく切っているとき(表には出ない)も、少し落とす
+    throttle *= 1 - 0.25 * Math.abs(steer)
+    // 終点の手前では速度を落とす
     const remaining = this.totalLength - this.travelled
     if (remaining < 4) throttle = Math.min(throttle, 0.2 + 0.2 * remaining)
 
