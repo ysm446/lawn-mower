@@ -31,7 +31,8 @@ import { CoverageGrid } from './sim/coverage'
 import { planCoverage, type MowPattern } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
-import { loadSettings, setupSettings, type AppSettings } from './settings'
+import { Profiler } from './profiler'
+import { DEFAULT_SETTINGS, loadSettings, setupSettings, type AppSettings } from './settings'
 import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
 import { DEFAULT_PLOTS, clusterPlots, type PlotResult } from './sim/plots'
@@ -156,7 +157,7 @@ const blocked = map.trees
       terrain.origin
     )
   : undefined
-const treeModels = new Trees(treeList, terrain)
+const treeModels = new Trees(treeList, terrain, renderer)
 scene.add(treeModels.group)
 const windSettings = { strength: 1 }
 // 時間の表現。タイムラプス(コマ落ち)と、時刻で動く太陽
@@ -496,9 +497,9 @@ function finishPlot(unit: MowerUnit): void {
 
 const params = FAIRWAY_MOWER
 
-// 芝刈り機。出発点に、横に並べて置く。台数は「区画と経路」パネルで 1〜5 台に変えられる(既定は 3 台)。
-// 起動時の指定 mowers=1〜5 でも変えられる
-const MAX_MOWERS = 5
+// 芝刈り機。出発点に、横に並べて置く。台数は「区画と経路」パネルで 1〜8 台に変えられる(既定は 3 台)。
+// 起動時の指定 mowers=1〜8 でも変えられる
+const MAX_MOWERS = 8
 const DEFAULT_MOWERS = 3
 const initialMowers = Math.min(Math.max(Math.round(Number(query.get('mowers')) || DEFAULT_MOWERS), 1), MAX_MOWERS)
 /** 出発点に並べるときの、機体どうしの横の間隔(m) */
@@ -596,7 +597,10 @@ const PATH_COLORS = [
   OVERLAY_PALETTE.gold,
   OVERLAY_PALETTE.coral,
   OVERLAY_PALETTE.violet,
-  OVERLAY_PALETTE.sky
+  OVERLAY_PALETTE.sky,
+  OVERLAY_PALETTE.rose,
+  OVERLAY_PALETTE.amber,
+  OVERLAY_PALETTE.mint
 ]
 const pathLines = new Map<MowerUnit, PathLine>()
 /** 機体の経路の線(なければ作る) */
@@ -1620,12 +1624,25 @@ if (query.get('gizmo') === '1') sunGizmo.held = true
   canvas.addEventListener('pointercancel', endSunDrag, { capture: true })
 }
 // 設定ウインドウ。セクション(タブ)ごとに項目を並べる
+/** ウィンドウサイズの選択肢(中身の高さ。幅は 16:9) */
+const WINDOW_SIZES = [1080, 900, 720]
+/** 設定のウィンドウサイズに合わせる。動画用サイズ(F11)の間と録画中は、メインプロセスの側で受け付けない */
+function applyWindowSize(): void {
+  const height = settings.windowSize
+  if (!WINDOW_SIZES.includes(height)) return
+  void window.lawnApi?.setWindowSize(Math.round((height * 16) / 9), height)
+}
+applyWindowSize()
 function applySetting(key: keyof AppSettings): void {
   if (key === 'pixelRatio') resize()
+  else if (key === 'windowSize') applyWindowSize()
   else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
-  else if (key === 'shadowDistance') lighting.setShadowDistance(settings.shadowDistance)
+  else if (key === 'shadowDistance') {
+    lighting.setShadowDistance(settings.shadowDistance)
+    treeModels.setShadowDistance(settings.shadowDistance)
+  } else if (key === 'shadowCascades') lighting.setShadowCascades(settings.shadowCascades)
   else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
   else if (key === 'clippings') {
     clippings.mesh.visible = settings.clippings
@@ -1663,6 +1680,14 @@ const toggleSettings = setupSettings(
           ]
         },
         {
+          type: 'choice',
+          key: 'windowSize',
+          label: 'ウィンドウサイズ',
+          title:
+            'ウィンドウの中身(タイトルバーを除く)の大きさ。画面の表示倍率を掛けた、見た目の大きさです。選ぶとすぐに変わり、次の起動もこの大きさで開きます。小さくすると描く画素が減って軽くなります',
+          options: WINDOW_SIZES.map((height) => ({ value: height, label: `${(height * 16) / 9} × ${height}` }))
+        },
+        {
           type: 'slider',
           key: 'grassDistance',
           label: '芝を描く距離',
@@ -1681,11 +1706,20 @@ const toggleSettings = setupSettings(
           type: 'slider',
           key: 'shadowDistance',
           label: '影を描く距離',
-          title: 'カメラからこの距離までに影を落とします。短くすると、近くの影が細かくなります',
+          title:
+            'カメラからこの距離までに影を落とします。短くすると、近くの影が細かくなります。長くするときは、影の段数も増やすと近くの影が粗くなりにくくなります',
           min: 60,
-          max: 500,
-          step: 10,
+          max: 1500,
+          step: 20,
           format: (v) => `${v.toFixed(0)} m`
+        },
+        {
+          type: 'choice',
+          key: 'shadowCascades',
+          label: '影の段数',
+          title:
+            '影を描く距離を、近くから遠くへ何段に分けて描くか(カスケードシャドウマップ)。段ごとに影の地図を 1 枚使い、近い段ほど細かい影になります。増やすと近くの影が細かくなり、段の数だけ重くなります',
+          options: [1, 2, 3, 4, 5].map((n) => ({ value: n, label: `${n}` }))
         },
         {
           type: 'choice',
@@ -1703,9 +1737,23 @@ const toggleSettings = setupSettings(
     {
       title: '表示',
       items: [
-        { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数を出します' },
+        { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数と、1 フレームの処理にかかった時間を出します' },
         { type: 'check', key: 'showHint', label: '操作の案内を表示', title: '画面の上に、操作の案内を出します' },
-        { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' }
+        { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' },
+        {
+          type: 'choice',
+          key: 'swayTimeScale',
+          label: '草木の揺れの倍速',
+          title:
+            '倍速のとき、風で草や木が揺れる速さを、何倍まで倍速に合わせるか。「等倍」は倍速にかかわらず実際の速さで揺れます。上げすぎると、高い倍速で草木が激しく震えます(タイムラプスでは、いつもコマごとに進みます)',
+          options: [
+            { value: 1, label: '等倍' },
+            { value: 2, label: '2 倍まで' },
+            { value: 4, label: '4 倍まで' },
+            { value: 8, label: '8 倍まで' },
+            { value: 16, label: '16 倍まで' }
+          ]
+        }
       ]
     },
     {
@@ -1837,10 +1885,13 @@ function formatTime(seconds: number): string {
 }
 
 let fps = 60
+// 1 フレームの処理にかかった時間(ミリ秒)。描画の間隔ではなく、frame() の中で使った時間
+let frameMs = 0
 const logFps = query.get('log') === '1'
 let logTimer = 0
-function updateReadouts(dt: number): void {
+function updateReadouts(dt: number, workMs: number): void {
   if (dt > 0) fps += (1 / dt - fps) * 0.05
+  frameMs += (workMs - frameMs) * 0.05
   const s = rig.settings
   // 機体ごとの値は、乗っている機体のもの。刈った面積は全台の合計
   const unit = rider
@@ -1870,9 +1921,9 @@ function updateReadouts(dt: number): void {
   // 動作確認用: ?log=1 で、描画の速さをログに出す
   if (logFps && (logTimer += dt) > 2) {
     logTimer = 0
-    console.warn(`fps ${fps.toFixed(0)}`)
+    console.warn(`fps ${fps.toFixed(0)}  ${frameMs.toFixed(1)} ms`)
   }
-  const fpsText = `${fps.toFixed(0)} fps`
+  const fpsText = `${fps.toFixed(0)} fps  ${frameMs.toFixed(1)} ms`
   if (fpsCounter.textContent !== fpsText) fpsCounter.textContent = fpsText
 }
 
@@ -1928,6 +1979,107 @@ function spawnClipping(x: number, z: number, vx: number, vy: number, vz: number)
   clippings.spawn(x, terrain.heightAt(x, z) + 0.1 + Math.random() * 0.1, z, vx, vy, vz)
 }
 
+// 動作確認用: ?profile=1 で、どこが重いかを測ってログに出し、終わったら閉じる(profiler.ts)
+const profiler = query.get('profile') === '1' ? createProfiler() : null
+function createProfiler(): Profiler {
+  // 測る間は、描画の回数と解像度の上限を外す(保存はしない)
+  settings.fpsLimit = 0
+  settings.pixelRatio = DEFAULT_SETTINGS.pixelRatio
+  resize()
+  const p = new Profiler(renderer.getContext() as WebGL2RenderingContext, {
+    warmup: 4,
+    settle: 1.5,
+    measure: 4,
+    variants: [
+      { name: '基準', apply: () => () => {} },
+      {
+        name: '影の更新を止める',
+        apply: () => {
+          renderer.shadowMap.autoUpdate = false
+          return () => (renderer.shadowMap.autoUpdate = true)
+        }
+      },
+      {
+        name: '芝の葉なし',
+        apply: () => {
+          bladeSettings.show = false
+          return () => (bladeSettings.show = true)
+        }
+      },
+      {
+        name: '木なし',
+        apply: () => {
+          treeModels.group.visible = false
+          return () => (treeModels.group.visible = true)
+        }
+      },
+      {
+        name: '被写界深度なし',
+        apply: () => {
+          const before = rig.settings.depthOfField
+          rig.settings.depthOfField = false
+          return () => (rig.settings.depthOfField = before)
+        }
+      },
+      {
+        name: '測光なし',
+        apply: () => {
+          meterPass.enabled = false
+          return () => (meterPass.enabled = true)
+        }
+      },
+      {
+        name: '描画の細かさ 標準',
+        apply: () => {
+          settings.pixelRatio = 1
+          resize()
+          return () => {
+            settings.pixelRatio = DEFAULT_SETTINGS.pixelRatio
+            resize()
+          }
+        }
+      },
+      ...[
+        { cascades: 5, distance: settings.shadowDistance },
+        { cascades: 5, distance: 1000 }
+      ].map(({ cascades, distance }) => ({
+        name: `影 ${cascades} 段 ${distance} m`,
+        apply: () => {
+          lighting.setShadowCascades(cascades)
+          lighting.setShadowDistance(distance)
+          treeModels.setShadowDistance(distance)
+          return () => {
+            lighting.setShadowCascades(settings.shadowCascades)
+            lighting.setShadowDistance(settings.shadowDistance)
+            treeModels.setShadowDistance(settings.shadowDistance)
+          }
+        }
+      }))
+    ],
+    onDone: (report) => {
+      console.warn(`[profile]\n${report}`)
+      setTimeout(() => window.close(), 500)
+    }
+  })
+  // 後処理の段ごとに区間を分ける。影の地図を描く所は、場面の描画の中から切り出す
+  const passNames = ['scene', 'meter', 'dof', 'output']
+  composer.passes.forEach((pass, i) => {
+    const render = pass.render.bind(pass)
+    pass.render = (...args) => {
+      p.begin(passNames[i] ?? `pass${i}`)
+      render(...args)
+    }
+  })
+  const shadowMap = renderer.shadowMap as unknown as { render: (...args: unknown[]) => void }
+  const renderShadows = shadowMap.render.bind(shadowMap)
+  shadowMap.render = (...args) => {
+    p.begin('shadow')
+    renderShadows(...args)
+    p.begin('scene')
+  }
+  return p
+}
+
 let last = performance.now()
 function frame(now: number): void {
   requestAnimationFrame(frame)
@@ -1936,6 +2088,8 @@ function frame(now: number): void {
   if (settings.fpsLimit > 0 && now - last < 1000 / settings.fpsLimit - 1.5) return
   const dt = Math.min((now - last) / 1000, 0.1)
   last = now
+  const workStart = performance.now()
+  profiler?.begin('sim')
 
   if (timeSettings.timelapse) {
     // タイムラプス: 画面は毎回描くが、時間は 1 コマぶんためてからまとめて進める。
@@ -1981,6 +2135,7 @@ function frame(now: number): void {
   // タイムラプスでは、粒もコマごとに進める
   if (!timeSettings.timelapse) clippings.update(dt * Math.min(sim.timeScale, 3))
   else if (steps > 0) clippings.update(Math.min(simSeconds, 3 / timeSettings.fps))
+  profiler?.begin('route')
   if (zoning.dirty) updateZoning()
   // 経路は、自動運転の機体と、区画と経路を表示しているときの乗っている機体の分を作る。重いので 1 フレームに 1 台まで
   checkTeams()
@@ -1988,6 +2143,7 @@ function frame(now: number): void {
   if (needsRoute) updateRoute(needsRoute)
   else if (plotting.dirty && route.show) updatePlots()
 
+  profiler?.begin('update')
   for (const unit of mowers) {
     unit.model.sync(unit.state, simSeconds, terrain)
     unit.followCamera(dt, timeSettings.timelapse)
@@ -2003,9 +2159,11 @@ function frame(now: number): void {
   rig.update(rider ? rider.cameraTarget : null, dt, terrain)
   updateViewHint()
   const exposure = rig.exposure
+  // 草木の揺れは、倍速に合わせるのを設定の倍率(swayTimeScale)までにする。高い倍速では激しく震えて見えるため。
   // タイムラプスでは木の揺れもコマごとに進める(1 コマごとに枝葉の形が変わり、ちらちらして見える)
-  windTime = (windTime + (timeSettings.timelapse ? simSeconds : dt)) % 4096
-  treeModels.update(windTime, windSettings.strength)
+  const swayStep = timeSettings.timelapse ? simSeconds : dt * Math.min(sim.timeScale, settings.swayTimeScale)
+  windTime = (windTime + swayStep) % 4096
+  treeModels.update(windTime, windSettings.strength, rig.camera.position)
   // 草の波も、木の揺れと同じ時刻と強さで動かす
   ground.uniforms.uWindTime.value = windTime
   ground.uniforms.uWindStrength.value = windSettings.strength
@@ -2022,7 +2180,9 @@ function frame(now: number): void {
     const at = rider ? rider.state : { x: rig.focusPoint.x, z: rig.focusPoint.z, heading: 0 }
     normalPreview.update(renderer, at.x, at.z, at.heading, view.x, view.z)
   }
+  profiler?.begin('lighting')
   lighting.update(renderer, exposure, rig.camera.position)
+  profiler?.begin('update')
   // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
   sunGizmo.update(
     dt,
@@ -2056,6 +2216,7 @@ function frame(now: number): void {
     far: rig.camera.far
   })
   composer.render()
+  profiler?.begin('readouts')
 
   // 自動露出: 測った明るさが標準の明るさになる露出へ、少しずつ寄せる
   if (s.autoExposure && meterPass.log2Average !== null) {
@@ -2073,6 +2234,7 @@ function frame(now: number): void {
     autoSyncTimer = 0
     syncUi()
   }
-  updateReadouts(dt)
+  updateReadouts(dt, performance.now() - workStart)
+  profiler?.frame(dt)
 }
 requestAnimationFrame(frame)

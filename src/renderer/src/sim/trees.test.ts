@@ -1,11 +1,11 @@
 ﻿import { describe, expect, it } from 'vitest'
 import { findMap } from './maps'
-import { blockedByTrees, clearingRadiusAt, generateTrees, inForest } from './trees'
+import { blockedByTrees, clearingRadiusAt, generateTrees, inForest, type ClearingSpec } from './trees'
 import { Terrain } from './terrain'
 import { DEFAULT_ZONING, ZONE_NONE, computeZoning } from './zoning'
 
 const map = findMap('meadow')
-const spec = map.trees!
+const spec = map.trees as ClearingSpec
 
 describe('樹木の配置', () => {
   const trees = generateTrees(spec, map.seed, map.startX, map.startZ)

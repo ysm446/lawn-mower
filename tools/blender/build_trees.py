@@ -8,6 +8,10 @@
 # アプリ側は、木ごとの樹高に合わせて全体を伸び縮みさせる(基準の高さは下の HEIGHTS)。
 # 部品の名前:
 #   broadleaf_0_bark, broadleaf_0_leaves, conifer_1_bark, shrub_0_leaves, ...
+# 中くらいの距離で使う簡略モデル(LOD1)も書き出す。名前は broadleaf_0_lod1_bark のように lod1 を挟む。
+# 同じシード値で同じ順に乱数を使い、作る形だけを減らすので、枝ぶりは細かいモデルと揃う:
+#   - 細い枝(4 段目から先)の筒は作らない。太い枝も、筒の角の数と節を減らす
+#   - 葉の板は、広葉樹と低木は 3 枚に 1 枚、針葉樹は 2 枚に 1 枚だけ作り、その分だけ大きくする(面積を保つ)
 
 import math
 import os
@@ -38,11 +42,29 @@ def perpendicular(direction):
 
 
 class TreeBuilder:
-    def __init__(self, seed):
+    def __init__(self, seed, lod=0):
         self.rng = random.Random(seed)
+        self.lod = lod
         self.bark = bmesh.new()
         self.leaves = bmesh.new()
         self.uv = self.leaves.loops.layers.uv.verify()
+        # LOD1 で葉の板を間引くための数え上げ
+        self.card_count = 0
+
+    def keep_card(self, every):
+        """LOD1 では every 枚に 1 枚だけ作る。作るなら大きさの倍率を返し、作らないなら 0"""
+        self.card_count += 1
+        if self.lod == 0:
+            return 1.0
+        return math.sqrt(every) if self.card_count % every == 0 else 0.0
+
+    def simple_tube(self, points, radius_start, radius_end, sides):
+        """LOD1 の筒。節を半分に減らす(両端は残す)"""
+        if self.lod == 0:
+            self.tube(points, radius_start, radius_end, sides)
+            return
+        kept = points[::2] if (len(points) - 1) % 2 == 0 else points[::2] + [points[-1]]
+        self.tube(kept, radius_start, radius_end, sides)
 
     # ---- 部品
 
@@ -98,7 +120,10 @@ class TreeBuilder:
             heading = (heading + wobble * (0.1 + 0.07 * depth) + Vector((0, 0, 0.05 * depth))).normalized()
             point = point + heading * (length / segments)
             points.append(point.copy())
-        self.tube(points, radius, radius * 0.55, sides)
+        if self.lod == 0:
+            self.tube(points, radius, radius * 0.55, sides)
+        elif depth <= 2:
+            self.simple_tube(points, radius, radius * 0.55, 5 if depth == 0 else 4 if depth == 1 else 3)
         if depth >= 2:
             self.leaf_cards(points, heading, depth, style)
         if depth >= 4:
@@ -134,7 +159,9 @@ class TreeBuilder:
             # 板は枝から外へ伸び、面はだいたい上を向きながら、ばらばらに傾く
             out = (heading + Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-0.4, 0.6))) * 0.9).normalized()
             normal = (Vector((0, 0, 1)) + Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-0.2, 0.4))) * 0.8).normalized()
-            self.card(base + out * length * 0.45, out, normal, length, length * 0.72)
+            grow = self.keep_card(3)
+            if grow > 0:
+                self.card(base + out * length * 0.45 * grow, out, normal, length * grow, length * 0.72 * grow)
 
     def build_broadleaf(self, height):
         rng = self.rng
@@ -159,7 +186,10 @@ class TreeBuilder:
         rng = self.rng
         top = height * rng.uniform(0.95, 1.05)
         trunk = [Vector((0, 0, -0.4 + (top + 0.4) * i / 10)) for i in range(11)]
-        self.tube(trunk, height * 0.02, height * 0.004, 7)
+        if self.lod == 0:
+            self.tube(trunk, height * 0.02, height * 0.004, 7)
+        else:
+            self.simple_tube(trunk, height * 0.02, height * 0.004, 4)
         z = height * rng.uniform(0.16, 0.22)
         turn = rng.uniform(0, 2 * math.pi)
         while z < top * 0.97:
@@ -177,7 +207,9 @@ class TreeBuilder:
                     Vector((0, 0, z)) + out * length * s + Vector((0, 0, -droop * length * math.sin(s * math.pi) + 0.08 * length * s * s))
                     for s in (0, 0.35, 0.7, 1.0)
                 ]
-                self.tube(points, 0.035 * (1 - t) + 0.008, 0.006, 3)
+                # LOD1 では枝の筒を作らない(葉の板に隠れる)
+                if self.lod == 0:
+                    self.tube(points, 0.035 * (1 - t) + 0.008, 0.006, 3)
                 # 葉の板を、枝に沿って重ねながら並べる
                 cards = max(1, round(length / 0.55))
                 for c in range(cards):
@@ -187,7 +219,9 @@ class TreeBuilder:
                     center = points[index] + (points[index + 1] - points[index]) * f
                     size = rng.uniform(0.85, 1.15) * (0.75 + 0.5 * (1 - t))
                     normal = (Vector((0, 0, 1)) + Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), 0)) * 0.35 - out * 0.15).normalized()
-                    self.card(center, out, normal, size, size * 0.62)
+                    grow = self.keep_card(2)
+                    if grow > 0:
+                        self.card(center, out, normal, size * grow, size * 0.62 * grow)
             z += rng.uniform(0.4, 0.6) * (0.6 + 0.6 * (1 - t))
 
     # ---- 仕上げ
@@ -230,10 +264,12 @@ def build():
     for kind, count in VARIANTS.items():
         for v in range(count):
             seed += 37
-            builder = TreeBuilder(seed)
-            getattr(builder, f"build_{kind}")(HEIGHTS[kind])
-            for obj in builder.finish(f"{kind}_{v}", bark, leaves):
-                print(obj.name, "面:", len(obj.data.polygons))
+            # 細かいモデルと、同じシード値の簡略モデル(LOD1)
+            for lod, name in ((0, f"{kind}_{v}"), (1, f"{kind}_{v}_lod1")):
+                builder = TreeBuilder(seed, lod)
+                getattr(builder, f"build_{kind}")(HEIGHTS[kind])
+                for obj in builder.finish(name, bark, leaves):
+                    print(obj.name, "面:", len(obj.data.polygons))
     os.makedirs(os.path.dirname(OUTPUT), exist_ok=True)
     bpy.ops.export_scene.gltf(
         filepath=OUTPUT,

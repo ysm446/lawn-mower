@@ -34,9 +34,30 @@ export const MAPS: MapSpec[] = [
     name: '丘陵',
     description: 'なだらかな丘が続く芝地。勾配で刈る範囲が分かれる',
     seed: 7,
-    shape: { hillScale: 1, mountainScale: 1 },
+    shape: { hillScale: 1, mountainScale: 0, plain: true },
     grass: { uncutHeight: 0.1, roughness: 0 },
     trees: null,
+    startX: -21,
+    startZ: -55,
+    plotArea: 12000
+  },
+  {
+    id: 'woodland',
+    name: '林のある丘陵',
+    description: 'なだらかな丘に林が点在する芝地。林の中は刈らない',
+    seed: 7,
+    shape: { hillScale: 1, mountainScale: 0, plain: true },
+    grass: { uncutHeight: 0.1, roughness: 0 },
+    trees: {
+      layout: 'groves',
+      scale: 110,
+      cover: 0.25,
+      spacing: 7.5,
+      outerRadius: 620,
+      lone: 8,
+      loneRadius: 230,
+      openings: [{ x: -21, z: -55, radius: 35 }]
+    },
     startX: -21,
     startZ: -55,
     plotArea: 12000
@@ -48,7 +69,7 @@ export const MAPS: MapSpec[] = [
     seed: 21,
     shape: { hillScale: 0.28, mountainScale: 0.15 },
     grass: { uncutHeight: 0.15, roughness: 1 },
-    trees: { clearingRadius: 62, variation: 14, spacing: 7.5, outerRadius: 300, lone: 5 },
+    trees: { layout: 'clearing', clearingRadius: 62, variation: 14, spacing: 7.5, outerRadius: 300, lone: 5 },
     startX: 0,
     startZ: -18,
     plotArea: 50000

@@ -9,16 +9,22 @@ export interface AppSettings {
   fpsLimit: number
   /** 描画の細かさの上限(画面の 1 画素あたりに描く画素の数の、縦横の倍率) */
   pixelRatio: number
+  /** ウィンドウの中身の高さ(画面の表示倍率を掛けた見た目の大きさ、16:9)。起動時と選んだときに合わせる */
+  windowSize: number
   /** 左上に fps を出すか */
   showFps: boolean
   /** 芝の葉を描く距離(m)。カメラが見ている地面のまわり、この半径まで葉を描く */
   grassDistance: number
   /** 影を描く距離(m) */
   shadowDistance: number
+  /** 影の段数(カスケードシャドウマップの段の数)。段ごとに影の地図を 1 枚使う */
+  shadowCascades: number
   /** 影の地図の一辺(画素)。大きいほど影の縁が細かい */
   shadowMapSize: number
   /** 刈りカスの粒を描くか */
   clippings: boolean
+  /** 倍速のとき、草木の揺れを何倍まで速くするか(1 は倍速をかけない) */
+  swayTimeScale: number
   /** 画面の上の、操作の案内を出すか */
   showHint: boolean
   /** 録画(Ctrl+F12)の毎秒のコマ数(30 か 60) */
@@ -30,11 +36,14 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   fpsLimit: 0,
   pixelRatio: 2,
+  windowSize: 1080,
   showFps: true,
   grassDistance: 20,
   shadowDistance: 220,
+  shadowCascades: 3,
   shadowMapSize: 2048,
   clippings: true,
+  swayTimeScale: 1,
   showHint: true,
   recordingFps: 30,
   recordingCursor: false

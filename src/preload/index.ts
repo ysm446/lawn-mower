@@ -18,5 +18,8 @@ contextBridge.exposeInMainWorld('lawnApi', {
   /** 録画の中身を書き足す */
   recordingChunk: (chunk: Uint8Array): Promise<void> => ipcRenderer.invoke('recording:chunk', chunk),
   /** 録画を書き終える。保存したパス、中身が空なら null */
-  recordingEnd: (): Promise<string | null> => ipcRenderer.invoke('recording:end')
+  recordingEnd: (): Promise<string | null> => ipcRenderer.invoke('recording:end'),
+  /** ウィンドウの中身の大きさを変える(画面の表示倍率を掛けた、見た目の大きさ) */
+  setWindowSize: (width: number, height: number): Promise<void> =>
+    ipcRenderer.invoke('window:set-size', width, height)
 })

@@ -8,6 +8,7 @@ import {
   initRecording,
   isRecordingPath,
   resetZoomOnLoad,
+  setWindowContentSize,
   toggleVideoSize,
   watchWindowTitle
 } from './recording'
@@ -40,6 +41,12 @@ function recordingDir(): string {
 ipcMain.handle('screenshot:reveal', (_event, filePath: string) => {
   const allowed = dirname(filePath) === screenshotDir() || isRecordingPath(filePath)
   if (allowed && existsSync(filePath)) shell.showItemInFolder(filePath)
+})
+
+// 設定のウィンドウサイズ(recording.ts)。頼んできた画面のウィンドウを変える
+ipcMain.handle('window:set-size', (event, width: number, height: number) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win) setWindowContentSize(win, width, height)
 })
 
 // 連続で撮っても前の通知が写らないよう、通知を隠して、消えた画面が描かれるまで待つ
