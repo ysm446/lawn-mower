@@ -21,6 +21,14 @@ export interface AppSettings {
   shadowCascades: number
   /** 影の地図の一辺(画素)。大きいほど影の縁が細かい */
   shadowMapSize: number
+  /** 樹木を細かいモデルで描く距離(m)。その先は簡略モデル */
+  treeDetailDistance: number
+  /** 樹木をインポスター(絵を貼った板)に切り替える距離(m)。その手前は簡略モデル */
+  treeImpostorDistance: number
+  /** 木の葉が日の光を照り返して、きらめくようにするか */
+  leafGlint: boolean
+  /** 逆光で、木の葉が日の光を透かして見える強さ(0 で透けない) */
+  leafTranslucency: number
   /** 刈りカスの粒を描くか */
   clippings: boolean
   /** 倍速のとき、草木の揺れを何倍まで速くするか(1 は倍速をかけない) */
@@ -42,6 +50,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shadowDistance: 220,
   shadowCascades: 3,
   shadowMapSize: 2048,
+  treeDetailDistance: 60,
+  treeImpostorDistance: 400,
+  leafGlint: true,
+  leafTranslucency: 0.5,
   clippings: true,
   swayTimeScale: 1,
   showHint: true,

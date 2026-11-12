@@ -220,6 +220,8 @@ export class Lighting {
   private readonly atmosphere = new Atmosphere()
   private lastSkyUpdate = -Infinity
   private readonly sunColor = new Color()
+  /** 太陽の光の色と強さ(露出を掛けたもの)。影の計算に入れない光を、材質の側で足すときに使う(葉の透けなど) */
+  readonly sunLight = new Color()
   private readonly sunDisc = new Color()
   private readonly cloudLit = new Color()
   // 霞と空で共有する値。空の表、霞の濃さ(色ごとの消散係数)、空の輝度に掛ける倍率(照度 × 露出)
@@ -305,6 +307,7 @@ export class Lighting {
       light.color.copy(this.sunColor)
       light.intensity = sunIlluminance * exposure
     }
+    this.sunLight.copy(this.sunColor).multiplyScalar(sunIlluminance * exposure)
     // 太陽の円盤。実際の輝度は桁違いに高く、描画バッファに収まらないので、控えめな値にする
     this.sunDisc.copy(this.sunColor).multiplyScalar(400000 * strongest)
 

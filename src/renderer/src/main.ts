@@ -1653,6 +1653,11 @@ function applySetting(key: keyof AppSettings): void {
     treeModels.setShadowDistance(settings.shadowDistance)
   } else if (key === 'shadowCascades') lighting.setShadowCascades(settings.shadowCascades)
   else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
+  else if (key === 'leafGlint') treeModels.setLeafGlint(settings.leafGlint)
+  else if (key === 'treeDetailDistance' || key === 'treeImpostorDistance') {
+    treeModels.setLodDistances(settings.treeDetailDistance, settings.treeImpostorDistance)
+  }
+  else if (key === 'leafTranslucency') treeModels.setLeafTranslucency(settings.leafTranslucency)
   else if (key === 'clippings') {
     clippings.mesh.visible = settings.clippings
     if (!settings.clippings) clippings.clear()
@@ -1740,6 +1745,48 @@ const toggleSettings = setupSettings(
             { value: 2048, label: '中' },
             { value: 4096, label: '高' }
           ]
+        }
+      ]
+    },
+    {
+      title: '樹木',
+      items: [
+        {
+          type: 'slider',
+          key: 'treeDetailDistance',
+          label: '細かく描く距離',
+          title: 'カメラからこの距離までの木を、細かいモデルで描きます。その先は枝と葉を減らした簡略モデルです。長くすると重くなります',
+          min: 20,
+          max: 300,
+          step: 10,
+          format: (v) => `${v.toFixed(0)} m`
+        },
+        {
+          type: 'slider',
+          key: 'treeImpostorDistance',
+          label: '板に切り替える距離',
+          title:
+            'カメラからこの距離より遠くの木を、木を撮った絵を貼った板(インポスター)で描きます。長くすると重くなります。「細かく描く距離」より近くはできません',
+          min: 100,
+          max: 1500,
+          step: 50,
+          format: (v) => `${v.toFixed(0)} m`
+        },
+        {
+          type: 'check',
+          key: 'leafGlint',
+          label: '葉のきらめき',
+          title: '日の当たる木の葉が、光を照り返してキラキラ瞬きます。日陰の葉と、200 m より遠くの木は光りません'
+        },
+        {
+          type: 'slider',
+          key: 'leafTranslucency',
+          label: '葉の透け',
+          title: '逆光で木を見たとき、日の光が葉を透けて、黄緑に明るく見える強さ。0 で透けません',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          format: (v) => v.toFixed(2)
         }
       ]
     },
@@ -2193,6 +2240,7 @@ function frame(now: number): void {
   }
   profiler?.begin('lighting')
   lighting.update(renderer, exposure, rig.camera.position)
+  treeModels.setSun(lighting.sunDirection, lighting.sunLight)
   profiler?.begin('update')
   // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
   sunGizmo.update(

@@ -34,9 +34,9 @@ import type { Tree, TreeKind } from '../sim/trees'
 import { broadleafTexture, needleTexture } from './leafTexture'
 import { buildImpostorAtlas, createImpostorMesh } from './treeImpostor'
 
-/** カメラからこの距離(水平、m)より近い木は、細かいモデル(LOD0)で描く */
+/** カメラからこの距離(水平、m)より近い木は、細かいモデル(LOD0)で描く(初期値。設定で変える) */
 const DETAIL_DISTANCE = 60
-/** この距離より遠い木はインポスター。その手前は簡略モデル(LOD1) */
+/** この距離より遠い木はインポスター。その手前は簡略モデル(LOD1)(初期値。設定で変える) */
 const IMPOSTOR_DISTANCE = 400
 /** trees.glb に簡略モデルが無いときの、細かいモデルとインポスターの境目 */
 const FALLBACK_DISTANCE = 80
@@ -52,6 +52,116 @@ const MODELS: Record<TreeKind, { height: number; variants: number }> = {
 
 /** 葉の板の、透明な所を切り抜く境目 */
 const LEAF_ALPHA_TEST = 0.4
+
+// 葉のきらめき(表現としての照り返し)。明るさや陰影は丸めた法線で決めたまま、太陽の照り返しだけを
+// 葉 1 枚ずつの向き(aLeafNormal)で足す。向きは葉ごとにずれた周期で揺らすので、照り返す葉が次々に入れ替わって瞬く
+/** 照り返しの強さ */
+const LEAF_GLINT_STRENGTH = 6
+/** 照り返しの鋭さ(大きいほど、光る点が少なくなる) */
+const LEAF_GLINT_SHARPNESS = 24
+/** 葉の絵(0〜1)を、一辺で何マスに分けるか。マスごとに光の点を 1 つ置く */
+const LEAF_GLINT_CELLS = 6
+/** 光の点の半径(マスの一辺に対する割合) */
+const LEAF_GLINT_SPOT = 0.3
+/** マスごとに照り返す向きをずらす大きさ */
+const LEAF_GLINT_SCATTER = 1.2
+/** 光の色に葉の色を混ぜる割合(0 で白、1 で葉の色をいちばん明るくした色) */
+const LEAF_GLINT_TINT = 0.75
+/** 葉の向きを揺らす大きさ(法線に足すベクトルの長さ) */
+const LEAF_GLINT_WOBBLE = 0.45
+/** 照り返しを消していく距離(m)。遠くでは粒が画素より小さくなり、ちらつきになるため */
+const LEAF_GLINT_FADE_START = 60
+const LEAF_GLINT_FADE_END = 200
+
+// 葉の透け(表現)。逆光で木を見たとき、日が葉を透けて黄緑に明るく見えるようにする。
+// 逆光で見える葉の多くは、手前の葉の影に入っている。影を入れた光で透けを描くとほとんど光らないので、
+// 影を入れない太陽の光(uSunLight)で描き、そのかわり強さを控えめにする
+/** 透けの強さ(設定の「葉の透け」の 1 にあたる強さ) */
+const LEAF_TRANSLUCENCY_STRENGTH = 1.6
+/** 太陽の方を向いて見たときの透けの鋭さ(大きいほど、太陽のまわりに絞られる) */
+const LEAF_TRANSLUCENCY_FOCUS = 3
+/** 樹冠の、太陽と反対の側の葉が、どこから見ても透けて見える分 */
+const LEAF_TRANSLUCENCY_BACK = 0.3
+
+/** lights_fragment_end のあとに置く */
+const LEAF_TRANSLUCENCY_FRAGMENT = /* glsl */ `
+{
+  vec3 sunView = normalize((viewMatrix * vec4(uSunDirection, 0.0)).xyz);
+  vec3 toCamera = normalize(vViewPosition);
+  // 太陽の方を向いて見るほど強い(前方への散乱)
+  float forward = pow(max(dot(-toCamera, sunView), 0.0), ${LEAF_TRANSLUCENCY_FOCUS.toFixed(1)});
+  // 樹冠の、太陽と反対の側の葉(丸めた法線が太陽の反対を向く)
+  float back = max(-dot(normal, sunView), 0.0);
+  float translucency = (forward + ${LEAF_TRANSLUCENCY_BACK.toFixed(2)} * back) * back * uLeafTranslucency;
+  // 葉を透けた光は、黄色みの強い緑になる
+  vec3 transmitted = diffuseColor.rgb * vec3(1.1, 1.15, 0.65);
+  reflectedLight.directDiffuse += uSunLight * transmitted * (RECIPROCAL_PI * translucency * ${LEAF_TRANSLUCENCY_STRENGTH.toFixed(1)});
+}
+`
+
+const LEAF_GLINT_VERTEX_HEADER = /* glsl */ `
+attribute vec3 aLeafNormal;
+varying vec3 vLeafGlint;
+`
+
+/** windVertex のあとに置く(windRoot を使う) */
+const LEAF_GLINT_VERTEX = /* glsl */ `
+{
+  float glintSeed = fract(sin(dot(aLeafNormal, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 6.2832
+    + windRoot.x * 0.37 + windRoot.z * 0.61;
+  float glintTime = uWindTime * (1.2 + uWindStrength);
+  vec3 glintNormal = aLeafNormal + ${LEAF_GLINT_WOBBLE.toFixed(2)} * vec3(
+    sin(glintTime * 2.1 + glintSeed),
+    sin(glintTime * 1.7 + glintSeed * 2.3),
+    cos(glintTime * 2.6 + glintSeed * 3.7)
+  );
+#ifdef USE_INSTANCING
+  glintNormal = mat3(instanceMatrix) * glintNormal;
+#endif
+  vLeafGlint = normalize(normalMatrix * glintNormal);
+}
+`
+
+/** lights_physical_pars_fragment のあとに置き、太陽などの直接光を受けるたびに、葉の照り返しを足す */
+const LEAF_GLINT_FRAGMENT = /* glsl */ `
+uniform float uLeafGlint;
+uniform float uLeafTranslucency;
+uniform vec3 uSunDirection;
+uniform vec3 uSunLight;
+varying vec3 vLeafGlint;
+void RE_Direct_Leaf(const in IncidentLight directLight, const in vec3 geometryPosition, const in vec3 geometryNormal,
+  const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material,
+  inout ReflectedLight reflectedLight) {
+  RE_Direct_Physical(directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight);
+  // 設定で切ってあるときは光らせない(uLeafGlint が 0)
+  if (uLeafGlint <= 0.0) return;
+  float fade = 1.0 - smoothstep(${LEAF_GLINT_FADE_START.toFixed(1)}, ${LEAF_GLINT_FADE_END.toFixed(1)}, length(geometryPosition));
+  if (fade <= 0.0) return;
+  // 葉の絵をマス目に分け、マスごとに小さな光の点を 1 つ置く。点の位置と、照り返す向きのずれはマスごとに変える
+  vec2 glintUv = vMapUv * ${LEAF_GLINT_CELLS.toFixed(1)};
+  vec2 glintCell = floor(glintUv);
+  vec3 glintRandom = fract(sin(vec3(
+    dot(glintCell, vec2(127.1, 311.7)),
+    dot(glintCell, vec2(269.5, 183.3)),
+    dot(glintCell, vec2(419.2, 371.9))
+  )) * 43758.5453);
+  float spot = smoothstep(${LEAF_GLINT_SPOT.toFixed(2)}, 0.0, length(fract(glintUv) - (0.25 + 0.5 * glintRandom.xy)));
+  if (spot <= 0.0) return;
+  // 両面の板なので、裏から見ているときは向きを返す
+  vec3 n = normalize(normalize(vLeafGlint) * (gl_FrontFacing ? 1.0 : -1.0) + (glintRandom - 0.5) * ${LEAF_GLINT_SCATTER.toFixed(2)});
+  float nl = dot(n, directLight.direction);
+  if (nl <= 0.0) return;
+  vec3 h = normalize(directLight.direction + geometryViewDir);
+  float glint = pow(max(dot(n, h), 0.0), ${LEAF_GLINT_SHARPNESS.toFixed(1)});
+  // 白く光らせず、葉の色を明るくした色(黄緑)で光らせる
+  vec3 leafHue = material.diffuseColor / max(max(material.diffuseColor.r, max(material.diffuseColor.g, material.diffuseColor.b)), 1e-3);
+  vec3 glintColor = mix(vec3(1.0), leafHue, ${LEAF_GLINT_TINT.toFixed(2)});
+  // directLight.color は影で暗くなった後の光なので、影の中の葉は光らない
+  reflectedLight.directSpecular += directLight.color * glintColor * (glint * spot * nl * fade * uLeafGlint * ${LEAF_GLINT_STRENGTH.toFixed(1)});
+}
+#undef RE_Direct
+#define RE_Direct RE_Direct_Leaf
+`
 
 // 葉は薄く、光を通す。裏から見ても暗くならないよう、裏面の法線を反転させない(芝の葉と同じ扱い)
 const LEAF_NORMAL_FIX = /* glsl */ `
@@ -156,9 +266,18 @@ export class Trees {
     uWindTime: { value: 0 },
     uWindStrength: { value: 1 }
   }
+  /** 葉のきらめきの強さの倍率(設定でオフのときは 0) */
+  private readonly leafGlint = { value: 1 }
+  /** 葉の透けの強さの倍率(設定の「葉の透け」。0 で透けない)と、透けに使う太陽の向きと光 */
+  private readonly leafTranslucency = { value: 1 }
+  private readonly sunDirection = { value: new Vector3(0, 1, 0) }
+  private readonly sunLight = { value: new Color(0, 0, 0) }
   private readonly lodGroups: LodGroup[] = []
   /** 最後に描き方を分けたときのカメラの位置。分け直しが要るときは null */
   private lodAt: { x: number; z: number } | null = null
+  /** 描き分けの境目(m)。setLodDistances で変える */
+  private detailDistance = DETAIL_DISTANCE
+  private impostorDistance = IMPOSTOR_DISTANCE
   /** 影を描く距離(m)。簡略モデルのうち、この内側の木だけが影を落とす */
   private shadowDistance = 220
 
@@ -241,18 +360,25 @@ export class Trees {
         }[] = []
         for (const kind of Object.keys(MODELS) as TreeKind[]) {
           const model = MODELS[kind]
-          const uniforms = { ...this.wind, uTreeHeight: { value: model.height } }
+          const uniforms = {
+            ...this.wind,
+            uLeafGlint: this.leafGlint,
+            uLeafTranslucency: this.leafTranslucency,
+            uSunDirection: this.sunDirection,
+            uSunLight: this.sunLight,
+            uTreeHeight: { value: model.height }
+          }
           const withWind = <T extends Material>(material: T, flutter: number, leaf: boolean): T => {
             material.onBeforeCompile = (shader) => {
               Object.assign(shader.uniforms, uniforms)
               shader.vertexShader = shader.vertexShader
-                .replace('#include <common>', '#include <common>\n' + WIND_HEADER)
-                .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + windVertex(flutter))
+                .replace('#include <common>', '#include <common>\n' + WIND_HEADER + (leaf ? LEAF_GLINT_VERTEX_HEADER : ''))
+                .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + windVertex(flutter) + (leaf ? LEAF_GLINT_VERTEX : ''))
               if (leaf) {
-                shader.fragmentShader = shader.fragmentShader.replace(
-                  '#include <normal_fragment_begin>',
-                  '#include <normal_fragment_begin>\n' + LEAF_NORMAL_FIX
-                )
+                shader.fragmentShader = shader.fragmentShader
+                  .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n' + LEAF_NORMAL_FIX)
+                  .replace('#include <lights_physical_pars_fragment>', '#include <lights_physical_pars_fragment>\n' + LEAF_GLINT_FRAGMENT)
+                  .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + LEAF_TRANSLUCENCY_FRAGMENT)
               }
             }
             // 樹種ごとに高さが違うので、シェーダーを使い回させない
@@ -296,6 +422,8 @@ export class Trees {
             const roundLeafNormals = (geometry: BufferGeometry): BufferGeometry => {
               const p = geometry.getAttribute('position')
               const n = geometry.getAttribute('normal')
+              // 葉 1 枚ずつの向きは、きらめきの照り返しに使うので残しておく
+              if (!geometry.getAttribute('aLeafNormal')) geometry.setAttribute('aLeafNormal', n.clone())
               const out = new Vector3()
               const own = new Vector3()
               for (let i = 0; i < p.count; i++) {
@@ -410,8 +538,34 @@ export class Trees {
   }
 
   /** 影を描く距離(m)を変える。簡略モデルのうち、影を落とす木の範囲が変わる */
+  /** 葉の透けの強さ(0 で透けない) */
+  setLeafTranslucency(strength: number): void {
+    this.leafTranslucency.value = strength
+  }
+
+  /** 葉の透けに使う太陽の向き(太陽へ向かう向き)と光。毎フレーム呼ぶ */
+  setSun(direction: Vector3, light: Color): void {
+    this.sunDirection.value.copy(direction)
+    this.sunLight.value.copy(light)
+  }
+
+  /** 葉のきらめきを入れるか、切るか */
+  setLeafGlint(on: boolean): void {
+    this.leafGlint.value = on ? 1 : 0
+  }
+
   setShadowDistance(distance: number): void {
     this.shadowDistance = distance
+    this.lodAt = null
+  }
+
+  /**
+   * 描き分けの境目(カメラからの水平の距離、m)を変える。detail より近い木は細かいモデル、
+   * impostor より遠い木はインポスター、その間は簡略モデル。impostor が detail より近いときは detail に揃える
+   */
+  setLodDistances(detail: number, impostor: number): void {
+    this.detailDistance = detail
+    this.impostorDistance = Math.max(impostor, detail)
     this.lodAt = null
   }
 
@@ -428,8 +582,8 @@ export class Trees {
       leafColors: meshes.leaves.instanceColor?.array as Float32Array | undefined,
       count: 0
     }))
-    const detailReach = simple ? DETAIL_DISTANCE : FALLBACK_DISTANCE
-    const simpleReach = simple ? IMPOSTOR_DISTANCE : FALLBACK_DISTANCE
+    const detailReach = simple ? this.detailDistance : FALLBACK_DISTANCE
+    const simpleReach = simple ? this.impostorDistance : FALLBACK_DISTANCE
     let far = 0
     for (let i = 0; i < trees.length; i++) {
       const tree = trees[i]
