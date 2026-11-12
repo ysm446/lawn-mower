@@ -1739,7 +1739,21 @@ const toggleSettings = setupSettings(
       items: [
         { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数と、1 フレームの処理にかかった時間を出します' },
         { type: 'check', key: 'showHint', label: '操作の案内を表示', title: '画面の上に、操作の案内を出します' },
-        { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' }
+        { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' },
+        {
+          type: 'choice',
+          key: 'swayTimeScale',
+          label: '草木の揺れの倍速',
+          title:
+            '倍速のとき、風で草や木が揺れる速さを、何倍まで倍速に合わせるか。「等倍」は倍速にかかわらず実際の速さで揺れます。上げすぎると、高い倍速で草木が激しく震えます(タイムラプスでは、いつもコマごとに進みます)',
+          options: [
+            { value: 1, label: '等倍' },
+            { value: 2, label: '2 倍まで' },
+            { value: 4, label: '4 倍まで' },
+            { value: 8, label: '8 倍まで' },
+            { value: 16, label: '16 倍まで' }
+          ]
+        }
       ]
     },
     {
@@ -2145,8 +2159,10 @@ function frame(now: number): void {
   rig.update(rider ? rider.cameraTarget : null, dt, terrain)
   updateViewHint()
   const exposure = rig.exposure
+  // 草木の揺れは、倍速に合わせるのを設定の倍率(swayTimeScale)までにする。高い倍速では激しく震えて見えるため。
   // タイムラプスでは木の揺れもコマごとに進める(1 コマごとに枝葉の形が変わり、ちらちらして見える)
-  windTime = (windTime + (timeSettings.timelapse ? simSeconds : dt)) % 4096
+  const swayStep = timeSettings.timelapse ? simSeconds : dt * Math.min(sim.timeScale, settings.swayTimeScale)
+  windTime = (windTime + swayStep) % 4096
   treeModels.update(windTime, windSettings.strength, rig.camera.position)
   // 草の波も、木の揺れと同じ時刻と強さで動かす
   ground.uniforms.uWindTime.value = windTime

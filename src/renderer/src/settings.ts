@@ -23,6 +23,8 @@ export interface AppSettings {
   shadowMapSize: number
   /** 刈りカスの粒を描くか */
   clippings: boolean
+  /** 倍速のとき、草木の揺れを何倍まで速くするか(1 は倍速をかけない) */
+  swayTimeScale: number
   /** 画面の上の、操作の案内を出すか */
   showHint: boolean
   /** 録画(Ctrl+F12)の毎秒のコマ数(30 か 60) */
@@ -41,6 +43,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shadowCascades: 3,
   shadowMapSize: 2048,
   clippings: true,
+  swayTimeScale: 1,
   showHint: true,
   recordingFps: 30,
   recordingCursor: false
