@@ -268,6 +268,8 @@ export class Trees {
   }
   /** 葉のきらめきの強さの倍率(設定でオフのときは 0) */
   private readonly leafGlint = { value: 1 }
+  private leafGlintOn = true
+  private leafGlintStrength = 1
   /** 葉の透けの強さの倍率(設定の「葉の透け」。0 で透けない)と、透けに使う太陽の向きと光 */
   private readonly leafTranslucency = { value: 1 }
   private readonly leafGlintSpeed = { value: 0.5 }
@@ -565,7 +567,14 @@ export class Trees {
 
   /** 葉のきらめきを入れるか、切るか */
   setLeafGlint(on: boolean): void {
-    this.leafGlint.value = on ? 1 : 0
+    this.leafGlintOn = on
+    this.leafGlint.value = on ? this.leafGlintStrength : 0
+  }
+
+  /** 葉のきらめきの強さ(倍) */
+  setLeafGlintStrength(strength: number): void {
+    this.leafGlintStrength = strength
+    this.leafGlint.value = this.leafGlintOn ? strength : 0
   }
 
   setShadowDistance(distance: number): void {

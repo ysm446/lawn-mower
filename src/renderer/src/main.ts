@@ -1674,6 +1674,7 @@ function applySetting(key: keyof AppSettings): void {
   else if (key === 'shadowMapSize') lighting.setShadowMapSize(settings.shadowMapSize)
   else if (key === 'leafGlint') treeModels.setLeafGlint(settings.leafGlint)
   else if (key === 'leafGlintSpeed') treeModels.setLeafGlintSpeed(settings.leafGlintSpeed)
+  else if (key === 'leafGlintStrength') treeModels.setLeafGlintStrength(settings.leafGlintStrength)
   else if (key === 'treeDetailDistance' || key === 'treeImpostorDistance') {
     treeModels.setLodDistances(settings.treeDetailDistance, settings.treeImpostorDistance)
   }
@@ -1805,6 +1806,16 @@ const toggleSettings = setupSettings(
           title: '葉のきらめきが瞬く速さ。小さくすると、ゆったり光っては消えます。風が強いほど、また草木の揺れを倍速にするほど速くなります',
           min: 0.25,
           max: 2,
+          step: 0.05,
+          format: (v) => `${v.toFixed(2)} 倍`
+        },
+        {
+          type: 'slider',
+          key: 'leafGlintStrength',
+          label: 'きらめきの強さ',
+          title: '葉のきらめきの明るさ。大きくすると、光る葉がまぶしく光ります。0 で光りません',
+          min: 0,
+          max: 3,
           step: 0.05,
           format: (v) => `${v.toFixed(2)} 倍`
         },

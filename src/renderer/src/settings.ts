@@ -29,6 +29,8 @@ export interface AppSettings {
   leafGlint: boolean
   /** 葉のきらめきの瞬く速さ(倍) */
   leafGlintSpeed: number
+  /** 葉のきらめきの強さ(倍) */
+  leafGlintStrength: number
   /** 逆光で、木の葉が日の光を透かして見える強さ(0 で透けない) */
   leafTranslucency: number
   /** 刈りカスの粒を描くか */
@@ -56,6 +58,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   treeImpostorDistance: 400,
   leafGlint: true,
   leafGlintSpeed: 0.5,
+  leafGlintStrength: 1,
   leafTranslucency: 0.5,
   clippings: true,
   swayTimeScale: 1,
