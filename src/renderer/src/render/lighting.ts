@@ -77,6 +77,7 @@ export const DEFAULT_LIGHTING: LightingSettings = {
 const CLOUD_GLSL = /* glsl */ `
 // 雲の縁の幅(ノイズの値の幅)。小さいほど、雲と雲の影の輪郭がはっきりする
 #define CLOUD_EDGE 0.022
+#define CLOUD_SHADOW_EDGE 0.07
 uniform vec2 uCloudOffset;
 uniform float uCloudCover;
 uniform vec2 uCloudSun;
@@ -97,7 +98,7 @@ float cloudNoise(vec2 p) {
 }
 // 雲の高さの水平面での位置 (m) から、雲の濃さ (0〜1) を求める。
 // 大きな形は 4 段のノイズで決め、細かい段(detail)を足して輪郭に凹凸をつけ、縁を締める(edge が縁の幅)。
-// 1200 m 上空の雲の影は、太陽の見かけの大きさによるぼけが 10 m ほどしかなく、輪郭はかなりはっきりする
+// 地面の影は、雲そのものの厚みのむらや散乱を見込んで、空の雲より縁を広くとる(CLOUD_SHADOW_EDGE)
 float cloudDensityAt(vec2 p, float edge, float detail) {
   if (uCloudCover <= 0.001) return 0.0;
   vec2 q = (p + uCloudOffset) / ${CLOUD_SIZE.toFixed(1)};
@@ -120,18 +121,23 @@ float cloudDensityAt(vec2 p, float edge, float detail) {
     }
     n += (fine / 0.875 - 0.5) * 0.09 * detail;
   }
-  float t = mix(0.74, 0.3, uCloudCover);
-  return smoothstep(t, t + edge, n);
+  // 縁の幅を変えても輪郭の位置が動かないよう、空の雲の縁の真ん中を中心にして幅を広げる
+  float c = mix(0.74, 0.3, uCloudCover) + CLOUD_EDGE * 0.5;
+  return smoothstep(c - edge * 0.5, c + edge * 0.5, n);
 }
 // 空の雲と地面の影で同じ式を使う(形と位置が揃う)
 float cloudDensity(vec2 p) {
   return cloudDensityAt(p, CLOUD_EDGE, 1.0);
 }
+// 地面の影は縁を空の雲より広くとり、細かいちぎれも弱めて輪郭をぼかす
+float cloudShadowDensity(vec2 p) {
+  return cloudDensityAt(p, CLOUD_SHADOW_EDGE, 0.5);
+}
 // 地上の点に届く太陽の光の割合。太陽の方向へたどった先の雲の濃さで決まる
 float cloudShadow(vec3 world) {
   vec2 p = world.xz + uCloudSun * (${CLOUD_HEIGHT.toFixed(1)} - world.y);
   // 厚い雲の下では、太陽の光はほとんど届かない(残るのは空からの光)
-  return 1.0 - 0.92 * cloudDensity(p);
+  return 1.0 - 0.92 * cloudShadowDensity(p);
 }
 `
 
