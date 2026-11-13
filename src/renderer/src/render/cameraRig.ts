@@ -125,6 +125,8 @@ export class CameraRig {
   private transition = -1
   private readonly fromPosition = new Vector3()
   private readonly fromQuaternion = new Quaternion()
+  /** 移り始めたときの焦点距離(mm)。視点ごとに焦点距離が違うので、これも混ぜる(急に画角が変わらないように) */
+  private fromFocalLength = 50
   private readonly restPosition = new Vector3()
   private readonly restQuaternion = new Quaternion()
   private blended = false
@@ -286,7 +288,8 @@ export class CameraRig {
    */
   stopHere(terrain: Terrain, around: Vector3, mode: 'top' | 'command' = 'top'): void {
     const cam = this.camera
-    // 移る途中なら、今見えている(混ぜた)位置と向きのまま止める
+    // 移る途中なら、今見えている(混ぜた)位置と向きと焦点距離のまま止める
+    if (this.transition >= 0) this.settings.focalLength = cam.getFocalLength()
     this.transition = -1
     this.blended = false
     const dir = cam.getWorldDirection(new Vector3())
@@ -428,6 +431,7 @@ export class CameraRig {
   beginTransition(): void {
     this.fromPosition.copy(this.camera.position)
     this.fromQuaternion.copy(this.camera.quaternion)
+    this.fromFocalLength = this.camera.getFocalLength()
     this.transition = 0
   }
 
@@ -467,6 +471,11 @@ export class CameraRig {
     // まっすぐ移る(弧を描いて持ち上げると、跳ねたように見える)。地面に潜りそうなときだけ、下の keepAboveGround で持ち上げる
     cam.position.lerpVectors(this.fromPosition, this.restPosition, k)
     cam.quaternion.slerpQuaternions(this.fromQuaternion, this.restQuaternion, k)
+    // 焦点距離は比で混ぜる(ズームの速さが一定に見える)。place が毎フレーム視点本来の値に戻すので、戻す処理は要らない
+    const toFocal = cam.getFocalLength()
+    if (Math.abs(toFocal - this.fromFocalLength) > 0.01) {
+      cam.setFocalLength(this.fromFocalLength * Math.pow(toFocal / this.fromFocalLength, k))
+    }
     this.keepAboveGround(terrain)
     this.blended = true
   }

@@ -2666,7 +2666,8 @@ function frame(now: number): void {
   focusDistance = focusDistance === 0 ? focusTarget : focusDistance + (focusTarget - focusDistance) * Math.min(1, dt * 6)
   dofPass.enabled = s.depthOfField
   dofPass.update({
-    focalLength: s.focalLength,
+    // 設定の値ではなく、今の画角の焦点距離(視点を切り替えて移る途中は、焦点距離も混ぜているので)
+    focalLength: rig.camera.getFocalLength(),
     fNumber: s.fNumber,
     sensorWidth: s.sensorWidth,
     focusDistance,
