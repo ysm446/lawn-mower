@@ -151,28 +151,30 @@ const glintAverageTable = ((): Float32Array => {
 })()
 
 // 葉の透け(表現)。逆光で木を見たとき、日が葉を透けて黄緑に明るく見えるようにする。
-// 逆光で見える葉の多くは、手前の葉の影に入っている。影を入れた光で透けを描くとほとんど光らないので、
-// 影を入れない太陽の光(uSunLight)で描き、そのかわり強さを控えめにする
+// 影を入れた太陽の光(葉のきらめきと同じ、RE_Direct で受け取る光)で描く。樹冠の奥の、手前の葉の陰になった葉は透けず、
+// 葉のすき間から日が差し込む所だけが、まばらに黄緑に光る(影を入れないと、太陽と反対側の半分がまとめて明るくなった)。
+// 光る葉が減る分、強さは上げてある
 /** 透けの強さ(設定の「葉の透け」の 1 にあたる強さ) */
-const LEAF_TRANSLUCENCY_STRENGTH = 1.6
+const LEAF_TRANSLUCENCY_STRENGTH = 5
 /** 太陽の方を向いて見たときの透けの鋭さ(大きいほど、太陽のまわりに絞られる) */
 const LEAF_TRANSLUCENCY_FOCUS = 3
 /** 樹冠の、太陽と反対の側の葉が、どこから見ても透けて見える分 */
 const LEAF_TRANSLUCENCY_BACK = 0.3
 
-/** lights_fragment_end のあとに置く */
+/** RE_Direct_Leaf の中で、影を入れた直接光ごとに呼ぶ */
 const LEAF_TRANSLUCENCY_FRAGMENT = /* glsl */ `
-{
-  vec3 sunView = normalize((viewMatrix * vec4(uSunDirection, 0.0)).xyz);
-  vec3 toCamera = normalize(vViewPosition);
-  // 太陽の方を向いて見るほど強い(前方への散乱)
-  float forward = pow(max(dot(-toCamera, sunView), 0.0), ${LEAF_TRANSLUCENCY_FOCUS.toFixed(1)});
-  // 樹冠の、太陽と反対の側の葉(丸めた法線が太陽の反対を向く)
-  float back = max(-dot(normal, sunView), 0.0);
+void leafTranslucency(const in IncidentLight directLight, const in vec3 geometryNormal, const in vec3 geometryViewDir,
+  const in PhysicalMaterial material, inout ReflectedLight reflectedLight) {
+  if (uLeafTranslucency <= 0.0) return;
+  // 樹冠の、光と反対の側の葉(丸めた法線が光の反対を向く)
+  float back = max(-dot(geometryNormal, directLight.direction), 0.0);
+  if (back <= 0.0) return;
+  // 光の方を向いて見るほど強い(前方への散乱)
+  float forward = pow(max(dot(-geometryViewDir, directLight.direction), 0.0), ${LEAF_TRANSLUCENCY_FOCUS.toFixed(1)});
   float translucency = (forward + ${LEAF_TRANSLUCENCY_BACK.toFixed(2)} * back) * back * uLeafTranslucency;
-  // 葉を透けた光は、黄色みの強い緑になる
-  vec3 transmitted = diffuseColor.rgb * vec3(1.1, 1.15, 0.65);
-  reflectedLight.directDiffuse += uSunLight * transmitted * (RECIPROCAL_PI * translucency * ${LEAF_TRANSLUCENCY_STRENGTH.toFixed(1)});
+  // 葉を透けた光は、黄色みの強い緑になる。directLight.color は影で暗くなった後の光なので、陰の葉は透けない
+  vec3 transmitted = material.diffuseColor * vec3(1.1, 1.15, 0.65);
+  reflectedLight.directDiffuse += directLight.color * transmitted * (RECIPROCAL_PI * translucency * ${LEAF_TRANSLUCENCY_STRENGTH.toFixed(1)});
 }
 `
 
@@ -211,6 +213,7 @@ uniform float uLeafTranslucency;
 uniform vec3 uSunDirection;
 uniform vec3 uSunLight;
 varying vec3 vLeafGlint;
+${LEAF_TRANSLUCENCY_FRAGMENT}
 // 遠くの葉: 葉 1 枚のきらめきを平均した明るさを足す。weight は葉 1 枚のきらめきが消えた割合(その分だけ置き換える)
 void leafAverageGlint(const in IncidentLight directLight, const in PhysicalMaterial material, float weight,
   inout ReflectedLight reflectedLight) {
@@ -222,6 +225,7 @@ void RE_Direct_Leaf(const in IncidentLight directLight, const in vec3 geometryPo
   const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material,
   inout ReflectedLight reflectedLight) {
   RE_Direct_Physical(directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight);
+  leafTranslucency(directLight, geometryNormal, geometryViewDir, material, reflectedLight);
   // 設定で切ってあるときは光らせない(uLeafGlint が 0)
   if (uLeafGlint <= 0.0) return;
   // 遠くの葉は画素より小さくなってちらつくので消す。望遠のときは葉が大きく写るので、その分遠くまで残す(uLeafGlintReach)
@@ -484,7 +488,6 @@ export class Trees {
                 shader.fragmentShader = shader.fragmentShader
                   .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n' + LEAF_NORMAL_FIX)
                   .replace('#include <lights_physical_pars_fragment>', '#include <lights_physical_pars_fragment>\n' + LEAF_GLINT_FRAGMENT)
-                  .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + LEAF_TRANSLUCENCY_FRAGMENT)
               }
             }
             // 樹種ごとに高さが違うので、シェーダーを使い回させない

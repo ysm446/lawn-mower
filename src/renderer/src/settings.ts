@@ -80,7 +80,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   leafGlint: true,
   leafGlintSpeed: 0.5,
   leafGlintStrength: 1,
-  leafTranslucency: 0.5,
+  leafTranslucency: 1,
   clippings: true,
   swayTimeScale: 1,
   showHint: true,
@@ -88,7 +88,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recordingCursor: false,
   showNormals: false,
   normalGain: 4,
-  defaultsVersion: 3
+  defaultsVersion: 4
 }
 
 /**
@@ -101,7 +101,9 @@ const DEFAULT_CHANGES: { version: number; key: keyof AppSettings; previous: numb
   { version: 2, key: 'shadowCascades', previous: 3 },
   // 版 3: 描画 FPS の上限と録画のコマ数を、どちらも 60 にそろえる
   { version: 3, key: 'fpsLimit', previous: 0 },
-  { version: 3, key: 'recordingFps', previous: 30 }
+  { version: 3, key: 'recordingFps', previous: 30 },
+  // 版 4: 葉の透けに影を入れて光る葉が縁だけになったので、既定を標準の 1 倍にする
+  { version: 4, key: 'leafTranslucency', previous: 0.5 }
 ]
 
 const STORAGE_KEY = 'lawn-mower-settings'
