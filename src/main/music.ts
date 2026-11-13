@@ -11,14 +11,9 @@ import { Readable } from 'node:stream'
 const AUDIO_SCHEME = 'lawn-audio'
 const AUDIO_EXTENSIONS = ['mp3', 'm4a', 'aac', 'ogg', 'opus', 'wav', 'flac']
 
-/**
- * 音源を少しずつ読むための読み込み口を登録する。app の準備ができる前に呼ぶ。
- * 録画で音を Web Audio に通すため、画面からの CORS の読み込みを受け付ける
- */
+/** 音源を少しずつ読むための読み込み口を登録する。app の準備ができる前に呼ぶ */
 export function registerAudioScheme(): void {
-  protocol.registerSchemesAsPrivileged([
-    { scheme: AUDIO_SCHEME, privileges: { standard: true, stream: true, corsEnabled: true } }
-  ])
+  protocol.registerSchemesAsPrivileged([{ scheme: AUDIO_SCHEME, privileges: { standard: true, stream: true } }])
 }
 
 // 動作確認で画面を撮る起動では userData が一時フォルダに切り替わるので、使うときに場所を求める
@@ -75,9 +70,7 @@ async function audioResponse(file: string, rangeHeader: string | null): Promise<
   const { start, end } = range ?? { start: 0, end: size - 1 }
   const headers: Record<string, string> = {
     'Accept-Ranges': 'bytes',
-    'Content-Length': String(end - start + 1),
-    // 録画のために <audio crossorigin> で読む(musicPlayer.ts)
-    'Access-Control-Allow-Origin': '*'
+    'Content-Length': String(end - start + 1)
   }
   if (range) headers['Content-Range'] = `bytes ${start}-${end}/${size}`
   const body = Readable.toWeb(createReadStream(file, { start, end })) as ReadableStream

@@ -2329,7 +2329,6 @@ initScreenRecorder({
   fps: () => settings.recordingFps,
   // 起動時の指定 reccursor=0 でも写さない(動作確認用)
   cursor: () => settings.recordingCursor && query.get('reccursor') !== '0',
-  audioTrack: () => music.recordingTrack(),
   onSaved: (filePath) => showSavedToast('recording', filePath)
 })
 if (query.get('settings') === '1') toggleSettings()

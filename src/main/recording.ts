@@ -4,7 +4,8 @@
 
 import { BrowserWindow, ipcMain, screen, session, type WebContents } from 'electron'
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { mkdir, rm, stat } from 'node:fs/promises'
+import { mkdir, rename, rm, stat } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 
 // 動画用サイズ: この物理ピクセルの大きさで、表示倍率 100% と同じ構図に描く
@@ -98,9 +99,43 @@ async function finishRecording(win: BrowserWindow | null): Promise<string | null
     (s) => s.size,
     () => 0
   )
-  if (size > 0) return target.filePath
+  if (size > 0) {
+    if (target.filePath.endsWith('.mp4')) await remuxForEditing(target.filePath)
+    return target.filePath
+  }
   await rm(target.filePath, { force: true })
   return null
+}
+
+/** ffmpeg の場所。環境変数 LM_FFMPEG で差し替えられる。既定は PATH の ffmpeg */
+function ffmpegPath(): string {
+  return process.env.LM_FFMPEG || 'ffmpeg'
+}
+
+/**
+ * MediaRecorder が書く MP4 は、1 秒ごとの断片を足していく形(断片化 MP4)で、先頭にフレームの索引が無い。
+ * 再生はできるが、DaVinci Resolve などの編集ソフトが読めないので、書き終えたら ffmpeg で普通の MP4 に詰め替える。
+ * エンコードし直さないので、画質はそのままで、数秒で終わる。ffmpeg が無い、または失敗したときは、元のファイルのまま残す
+ */
+async function remuxForEditing(filePath: string): Promise<void> {
+  const temp = `${filePath}.part`
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        ffmpegPath(),
+        ['-v', 'error', '-y', '-i', filePath, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', temp],
+        { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }
+      )
+      let message = ''
+      child.stderr.on('data', (data: Buffer) => (message += data.toString()))
+      child.on('error', reject)
+      child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(message.trim() || `exit ${code}`))))
+    })
+    await rename(temp, filePath)
+  } catch (err) {
+    console.warn('recording remux failed (kept the original file)', err)
+    await rm(temp, { force: true })
+  }
 }
 
 // 画面を読み直すと録画も途切れるので、そこまでの分でファイルを閉じる

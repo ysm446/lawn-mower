@@ -27,8 +27,6 @@ function setStatus(target: HTMLElement, message: string, isError = false): void 
 }
 
 export interface MusicPlayer {
-  /** 録画に入れる音。音源を一度も選んでいなければ null */
-  recordingTrack(): MediaStreamTrack | null
   /** 設定ウインドウの「音楽」タブの中身を作る */
   buildSettings(panel: HTMLElement): Sync
   /** 音量を設定の値に合わせ直す(「すべて既定に戻す」のあとなど) */
@@ -52,8 +50,6 @@ export function initMusicPlayer(options: {
   const audio = new Audio()
   audio.loop = true
   audio.preload = 'none'
-  // 録画で Web Audio に通すとき、別の生成元(lawn-audio://)の音でも無音にならないよう CORS で読む
-  audio.crossOrigin = 'anonymous'
   let file: string | null = null
   let loads = 0
   let hideTimer = 0
@@ -194,23 +190,6 @@ export function initMusicPlayer(options: {
     .then(setFile)
     .catch((err) => console.error('music file load failed', err))
 
-  // 録画に入れる音。初めて頼まれたときに音楽を Web Audio に通し、スピーカーと録画の両方へ流す。
-  // 一度通すと戻せないので、そのあとも同じものを使う。止まっている間は無音の音が流れる
-  let recordingAudio: { context: AudioContext; destination: MediaStreamAudioDestinationNode } | null = null
-  function recordingTrack(): MediaStreamTrack | null {
-    if (!recordingAudio) {
-      if (!file) return null
-      const context = new AudioContext()
-      const source = context.createMediaElementSource(audio)
-      const destination = context.createMediaStreamDestination()
-      source.connect(context.destination)
-      source.connect(destination)
-      recordingAudio = { context, destination }
-    }
-    void recordingAudio.context.resume()
-    return recordingAudio.destination.stream.getAudioTracks()[0] ?? null
-  }
-
   function buildSettings(panel: HTMLElement): Sync {
     const box = document.createElement('div')
     box.className = 'music-settings'
@@ -219,7 +198,7 @@ export function initMusicPlayer(options: {
     const note = document.createElement('p')
     note.className = 'panel-note'
     note.textContent =
-      '選んだ音源は、右上の音楽のボタンでループ再生します(mp3、m4a、aac、ogg、opus、wav、flac)。ボタンにカーソルを合わせると音量を変えられます。録画(Ctrl+F12)にも音が入ります。'
+      '選んだ音源は、右上の音楽のボタンでループ再生します(mp3、m4a、aac、ogg、opus、wav、flac)。ボタンにカーソルを合わせると音量を変えられます。録画(Ctrl+F12)には音は入りません(動画の編集で、元の音源を重ねてください)。'
     const buttons = document.createElement('div')
     buttons.className = 'music-settings-buttons'
     const choose = document.createElement('button')
@@ -267,5 +246,5 @@ export function initMusicPlayer(options: {
     return () => refreshSettings()
   }
 
-  return { recordingTrack, buildSettings, syncVolume }
+  return { buildSettings, syncVolume }
 }

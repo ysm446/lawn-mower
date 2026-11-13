@@ -19,6 +19,7 @@ import { initMusic, registerAudioScheme } from './music'
 //   LM_QUERY            レンダラーに渡すクエリ文字列(例: "auto=1&timescale=16&cam=orbit")
 //   LM_SCREENSHOT       指定すると、そのパスに画面を保存して終了する
 //   LM_SCREENSHOT_DELAY 保存までの待ち時間(ミリ秒)。既定は 5000
+//   LM_FFMPEG           録画を書き終えたあとの詰め替えに使う ffmpeg のパス。既定は PATH の ffmpeg(recording.ts)
 //   LM_NO_VSYNC         1 にすると、画面の更新(垂直同期)に合わせずに描く。計測モード(profile=1)で fps を比べるとき用
 const query = process.env.LM_QUERY ?? ''
 const screenshotPath = process.env.LM_SCREENSHOT

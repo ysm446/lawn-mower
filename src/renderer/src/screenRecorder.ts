@@ -1,4 +1,5 @@
-// 画面の録画(weather-globe の screen-recorder.ts を移植)。音楽を選んでいれば、その音も入れる(musicPlayer.ts)。
+// 画面の録画(weather-globe の screen-recorder.ts を移植)。映像だけで、音楽は入れない(編集ソフトで元の音源を重ねるほうが音質がよいため)。
+// 書き終えたら、メインプロセスが編集ソフトで読める普通の MP4 に詰め替える(main/recording.ts)。
 // Ctrl+F12(メインプロセスから届く)で始めて止める。ウィンドウの中身を getDisplayMedia で受け取り、
 // MediaRecorder で書き出す。中身は 1 秒ごとにメインプロセスへ送り、recordings/ のファイルに追記する(main/recording.ts)。
 // 大きさは今のウィンドウの物理ピクセルのまま。きっちりした大きさにしたいときは、先に動画用サイズ(F11)にする
@@ -8,7 +9,6 @@ const CHUNK_MS = 1000
 const BITS_PER_PIXEL = 0.2
 const MIN_VIDEO_BPS = 8_000_000
 const MAX_VIDEO_BPS = 60_000_000
-const AUDIO_BPS = 192_000
 
 // 使える最初の形式で書き出す。Electron は MP4(H.264)を直接書ける。
 // avc1.640034 は High プロファイルのレベル 5.2 で、4K 60 コマまで収まる
@@ -34,8 +34,6 @@ export function initScreenRecorder(options: {
   fps: () => number
   /** 設定の「マウスポインタを写す」 */
   cursor: () => boolean
-  /** 録画に入れる音(音楽)。無ければ null */
-  audioTrack: () => MediaStreamTrack | null
   /** 保存したとき。保存できなかったときは null */
   onSaved: (filePath: string | null) => void
 }): void {
@@ -58,17 +56,14 @@ export function initScreenRecorder(options: {
       cursor: options.cursor() ? 'always' : 'never'
     } as MediaTrackConstraints
     const stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false })
-    const audio = options.audioTrack()
-    if (audio) stream.addTrack(audio)
     const format = FORMATS.find((f) => MediaRecorder.isTypeSupported(f.mimeType))
     if (!format) {
-      stream.getVideoTracks().forEach((track) => track.stop())
+      stream.getTracks().forEach((track) => track.stop())
       throw new Error('録画できる形式がありません')
     }
     const recorder = new MediaRecorder(stream, {
       mimeType: format.mimeType,
-      videoBitsPerSecond: videoBitrate(width, height, fps),
-      audioBitsPerSecond: AUDIO_BPS
+      videoBitsPerSecond: videoBitrate(width, height, fps)
     })
     await api!.recordingBegin(format.extension)
 
@@ -86,8 +81,7 @@ export function initScreenRecorder(options: {
     })
     const stopped = new Promise<string | null>((resolve) => {
       recorder.addEventListener('stop', () => {
-        // 音楽の音の流れは使い回すので止めない
-        stream.getVideoTracks().forEach((track) => track.stop())
+        stream.getTracks().forEach((track) => track.stop())
         void writing
           .then(() => api!.recordingEnd())
           .then((saved) => resolve(failed ? null : saved))
