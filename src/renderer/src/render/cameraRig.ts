@@ -42,8 +42,6 @@ const ARM_MIN_POLAR = 0.06
 // 乗る機体を変えたとき: 前のカメラの位置と向きから、新しい視点へなめらかに移る
 /** 移るのにかける時間(秒) */
 const TRANSITION_SECONDS = 2
-/** 移る途中で持ち上げる高さの上限(m)。離れた機体へ移るとき、地面すれすれを通らないように弧を描く */
-const TRANSITION_MAX_LIFT = 60
 
 // 俯瞰の置き方: 見る点から、見る向きの後ろへ TOP_BACK、上へ TOP_UP(ホイールの倍率を掛ける)
 const TOP_BACK = Math.hypot(60, 110)
@@ -466,9 +464,8 @@ export class CameraRig {
     // 始めと終わりをゆっくりにする(smootherstep)
     const t = this.transition
     const k = t * t * t * (t * (t * 6 - 15) + 10)
-    const lift = Math.min(this.fromPosition.distanceTo(this.restPosition) * 0.25, TRANSITION_MAX_LIFT)
+    // まっすぐ移る(弧を描いて持ち上げると、跳ねたように見える)。地面に潜りそうなときだけ、下の keepAboveGround で持ち上げる
     cam.position.lerpVectors(this.fromPosition, this.restPosition, k)
-    cam.position.y += Math.sin(Math.PI * k) * lift
     cam.quaternion.slerpQuaternions(this.fromQuaternion, this.restQuaternion, k)
     this.keepAboveGround(terrain)
     this.blended = true
