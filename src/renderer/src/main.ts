@@ -20,8 +20,9 @@ import { NormalPreview } from './render/normalPreview'
 import { createGround } from './render/ground'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
-import { OVERLAY_PALETTE, overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
+import { OVERLAY_PALETTE, overlayColor, overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
+import { SelectionRings } from './render/selectionRings'
 import { Trees } from './render/trees'
 import { enhanceSelect } from './customSelect'
 import { DofPass, MeterPass } from './render/postfx'
@@ -209,6 +210,9 @@ const zoneOverlay = new ZoneOverlay(terrain)
 scene.add(zoneOverlay.lines)
 const plotOverlay = new PlotOverlay(terrain)
 scene.add(plotOverlay.lines)
+// 管制の視点で選んでいる機体のまわりの輪
+const selectionRings = new SelectionRings(terrain)
+scene.add(selectionRings.fill, selectionRings.outline.mesh)
 
 // 刈る前の芝の長さのむら(場所ごとの倍率)
 const grassField = new GrassField({
@@ -323,6 +327,7 @@ function updatePlots(): void {
   for (const unit of mowers) {
     unit.plot = -1
     unit.finishedPlot = -1
+    unit.ordered = false
   }
   plotOverlay.update(result)
   refreshPlotOverlay()
@@ -337,9 +342,9 @@ function markRoutesDirty(dropFollower = false): void {
   }
 }
 
-/** 区画の線を描き直す。乗っている機体の受け持つ区画を「今の区画」として目立たせる */
+/** 区画の線を描き直す。乗っている機体(管制の視点では 1 台だけ選んでいる機体)の受け持つ区画を「今の区画」として目立たせる */
 function refreshPlotOverlay(): void {
-  plotOverlay.setState(rider ? rider.plot : -1, plotting.done)
+  plotOverlay.setState(focusedMower()?.plot ?? -1, plotting.done)
 }
 
 /** ほかの機体が受け持っていて、まだ刈り終えていない区画か */
@@ -354,6 +359,9 @@ function plotTaken(id: number, except: MowerUnit): boolean {
 function assignPlot(unit: MowerUnit): void {
   const result = plotting.result
   if (!result || result.plots.length === 0) return
+  // 管制の視点で指示された区画は、刈り終えるまで続ける
+  if (unit.ordered && unit.plot >= 0 && !plotting.done.has(unit.plot)) return
+  unit.ordered = false
   if (plotting.teamwork) {
     // 分担して刈るときは、今の区画を続けるか、ほかの機体が刈っている区画に加わる(自分の分を終えた区画には戻らない)
     const open = (id: number): boolean => id >= 0 && !plotting.done.has(id) && id !== unit.finishedPlot
@@ -483,8 +491,29 @@ function selectPlot(id: number): void {
   syncUi()
 }
 
+/**
+ * 管制の視点: 選んでいる機体に、その区画を刈るよう指示する。自動運転にして、今いる所からその区画へ向かわせる。
+ * 何台かに出したときや、ほかの機体がすでに受け持っているときは、同じ区画を分担して刈る(teamOf)。
+ * 刈り終えた区画を指示したときは、もう一度刈る
+ */
+function orderPlot(units: MowerUnit[], plot: number): void {
+  if (units.length === 0 || plot < 0) return
+  plotting.done.delete(plot)
+  for (const unit of units) {
+    unit.plot = plot
+    unit.finishedPlot = -1
+    unit.ordered = true
+    unit.autoDrive = true
+    unit.route.dirty = true
+    unit.route.follower = null
+  }
+  refreshPlotOverlay()
+  syncUi()
+}
+
 /** 機体が受け持つ区画を刈り終えたとき。続けて進む設定なら、まだ刈っていない空いた区画へ移る */
 function finishPlot(unit: MowerUnit): void {
+  unit.ordered = false
   if (unit.plot >= 0) {
     // 分担しているときは、組のほかの機体がまだ刈っていれば、区画はまだ刈り終えていない。自分は次の区画へ移る
     const others = teamOf(unit).filter((m) => m !== unit)
@@ -526,6 +555,15 @@ function startPose(i: number): { x: number; z: number; heading: number } {
 const mowers: MowerUnit[] = []
 /** 乗っている機体。null なら誰にも乗っておらず、俯瞰で全体を見る */
 let rider: MowerUnit | null = null
+/**
+ * 管制の視点で選んでいる機体(選んだ順)。管制の視点では機体に乗らず、選んだ機体に区画を指示する(RTS の流儀)。
+ * ほかの視点に移ると空にする
+ */
+let selection: MowerUnit[] = []
+/** 状態の表示や区画の操作で「今の機体」として扱う機体。乗っている機体、なければ 1 台だけ選んでいる機体 */
+function focusedMower(): MowerUnit | null {
+  return rider ?? (selection.length === 1 ? selection[0] : null)
+}
 
 /**
  * 台数を変える。足りない分は作り、多い分は後ろの番号から消す。
@@ -537,6 +575,7 @@ function setMowerCount(count: number): void {
   while (mowers.length > n) {
     const unit = mowers.pop() as MowerUnit
     if (unit === rider) leaveMower()
+    selection = selection.filter((m) => m !== unit)
     scene.remove(unit.model.root)
     unit.model.dispose()
     removePathLine(unit)
@@ -632,6 +671,8 @@ const PATH_COLORS = [
   OVERLAY_PALETTE.amber,
   OVERLAY_PALETTE.mint
 ]
+/** 管制の視点で選んだ機体の輪の色(経路と同じ色) */
+const RING_COLORS = PATH_COLORS.map((css) => overlayColor(css))
 const pathLines = new Map<MowerUnit, PathLine>()
 /** 機体の経路の線(なければ作る) */
 function pathLineOf(unit: MowerUnit): PathLine {
@@ -759,14 +800,20 @@ rig.setMode('top')
 if (query.get('auto') === '1') for (const unit of mowers) unit.autoDrive = true
 const queryScale = Number(query.get('timescale'))
 if (queryScale > 0) sim.timeScale = queryScale
-const queryCam = query.get('cam') as CameraMode | null
-// ride=N で N 号機に乗った状態で始める。俯瞰以外の視点を指定したときは、指定がなければ 1 号機に乗る
+// cam=command(管制)は、以前の名前 cam=fixed(定点)でも受け付ける
+const queryCamRaw = query.get('cam')
+const queryCam = (queryCamRaw === 'fixed' ? 'command' : queryCamRaw) as CameraMode | null
+// ride=N で N 号機に乗った状態で始める。追従とドローンを指定したときは、指定がなければ 1 号機に乗る
+// (管制では乗らず、ride=N の機体を選んだ状態で始める)
 const queryRide = Math.round(Number(query.get('ride')))
-if (queryRide >= 1 && queryRide <= mowers.length) rider = mowers[queryRide - 1]
-else if (queryCam && queryCam !== 'top' && CAMERA_MODES.includes(queryCam)) rider = mowers[0]
-if (queryCam && CAMERA_MODES.includes(queryCam) && (rider || queryCam === 'top')) rig.setMode(queryCam)
+const freeView = queryCam === 'top' || queryCam === 'command'
+if (queryRide >= 1 && queryRide <= mowers.length) {
+  if (queryCam === 'command') selection = [mowers[queryRide - 1]]
+  else rider = mowers[queryRide - 1]
+} else if (queryCam && !freeView && CAMERA_MODES.includes(queryCam)) rider = mowers[0]
+if (queryCam && CAMERA_MODES.includes(queryCam) && (rider || freeView)) rig.setMode(queryCam)
 else if (rider) rig.setMode('chase')
-// 定点の視点の、自動の旋回の段(動作確認用)
+// ドローン、俯瞰、管制の視点の、自動の旋回の段(動作確認用)
 const queryOrbit = Number(query.get('orbit'))
 if (queryOrbit) rig.stepOrbit(queryOrbit)
 // 追従視点の向き(動作確認用)。「回り込む角度,見上げ下げの角度」を度で書く。例: chase=0,-18 で地平線を見る
@@ -1255,6 +1302,7 @@ syncs.push(
       for (const unit of mowers) {
         unit.plot = -1
         unit.finishedPlot = -1
+        unit.ordered = false
       }
       markRoutesDirty(true)
       refreshPlotOverlay()
@@ -1297,10 +1345,38 @@ syncs.push(
 )
 
 /**
- * 視点を切り替える。誰にも乗っていないときに俯瞰以外を選んだら、
- * 見ている場所にいちばん近い機体に乗る(追従やドローンは、追う機体が要るため)
+ * 視点を切り替える。誰にも乗っていないときに追従やドローンを選んだら、
+ * 見ている場所にいちばん近い機体に乗る(追う機体が要るため)。
+ * 管制に入るときは、カメラをその場で止めて降り、乗っていた機体を選んだ状態にする。
+ * 管制から追従やドローンに移るときは、選んでいた機体(なければ近い機体)に乗る。俯瞰に移るときは乗らない
  */
 function setView(mode: CameraMode): void {
+  const from = rig.mode
+  if (mode === 'command') {
+    if (from !== 'command') {
+      const around = rider
+        ? new Vector3(rider.state.x, terrain.heightAt(rider.state.x, rider.state.z), rider.state.z)
+        : rig.focusPoint.clone()
+      rig.stopHere(terrain, around, 'command')
+      selection = rider ? [rider] : []
+      rider = null
+      refreshPlotOverlay()
+    }
+    syncUi()
+    return
+  }
+  if (from === 'command') {
+    const pick = selection[0] ?? null
+    selection = []
+    if (mode === 'top') {
+      rig.stopHere(terrain, rig.focusPoint.clone(), 'top')
+      refreshPlotOverlay()
+      syncUi()
+    } else {
+      boardMower(pick ?? nearestMower(rig.focusPoint.x, rig.focusPoint.z), mode)
+    }
+    return
+  }
   if (!rider && mode !== 'top') boardMower(nearestMower(rig.focusPoint.x, rig.focusPoint.z), mode)
   else if (mode !== rig.mode) {
     // 視点を変えるときも、今の見え方から新しい視点へなめらかに移す
@@ -1333,7 +1409,6 @@ function boardMower(unit: MowerUnit, mode?: CameraMode): void {
   // カメラは、今の見え方から新しい機体の視点へなめらかに移す
   if (rider !== unit) rig.beginTransition()
   rider = unit
-  // 定点の視点では、据えたカメラのまま、新しい機体を見る
   if (!wasFree) rig.retarget()
   // カメラが追う位置を、今の機体の位置から始める(タイムラプスで、前の機体の位置から滑ってこないように)
   Object.assign(unit.cameraTarget, unit.state)
@@ -1353,16 +1428,39 @@ function leaveMower(): void {
   syncUi()
 }
 
-/** 次の機体に乗り移る(誰にも乗っていなければ 1 号機に乗る) */
+/** 次の機体に乗り移る(誰にも乗っていなければ 1 号機に乗る)。管制の視点では、次の機体を選ぶ */
 function boardNextMower(step: number): void {
-  const index = rider ? (rider.index + step + mowers.length) % mowers.length : 0
-  boardMower(mowers[index])
+  const current = rider ?? selection[selection.length - 1] ?? null
+  const index = current ? (current.index + step + mowers.length) % mowers.length : 0
+  pickMower(mowers[index], false)
+}
+
+/** 機体を選び直したときの共通の後始末 */
+function selectionChanged(): void {
+  refreshPlotOverlay()
+  syncUi()
+}
+
+/**
+ * 機体を指したとき(クリック、数字キー、Tab)。管制の視点では選ぶだけで、乗らず、カメラも動かさない
+ * (additive なら、選んでいる機体に足す。すでに選んでいれば外す)。ほかの視点では、その機体に乗る
+ */
+function pickMower(unit: MowerUnit, additive: boolean): void {
+  if (rig.mode !== 'command') {
+    if (unit !== rider) boardMower(unit)
+    return
+  }
+  if (!additive) selection = [unit]
+  else if (selection.includes(unit)) selection = selection.filter((m) => m !== unit)
+  else selection = [...selection, unit]
+  selectionChanged()
 }
 
 const autoButton = byId<HTMLButtonElement>('toggle-auto')
-/** 自動運転の対象。乗っている機体、誰にも乗っていなければ全台 */
+/** 自動運転の対象。乗っている機体、管制の視点で選んでいる機体、どちらもなければ全台 */
 function autoTargets(): MowerUnit[] {
-  return rider ? [rider] : mowers
+  if (rider) return [rider]
+  return selection.length > 0 ? selection : mowers
 }
 /** 自動運転の対象が、すべて自動運転中か */
 function autoDriving(): boolean {
@@ -1379,7 +1477,7 @@ function setAutoDrive(on: boolean): void {
 syncs.push(() => {
   const on = autoDriving()
   autoButton.setAttribute('aria-pressed', String(on))
-  const whom = rider ? rider.name : '全台'
+  const whom = rider ? rider.name : selection.length > 0 ? selection.map((m) => m.name).join('、') : '全台'
   const label = on ? `自動運転を止める(${whom})` : `自動運転(${whom})`
   autoButton.setAttribute('aria-label', label)
   autoButton.title = `${label}(P)`
@@ -1409,6 +1507,19 @@ const toggleHelp = setupHelp([
     ]
   },
   {
+    title: '管制の視点',
+    items: [
+      { keys: ['クリック'], text: '芝刈り機を選ぶ(乗らず、カメラも動かない)。何もない所をクリックすると、選ぶのをやめる' },
+      { keys: ['Shift', '+', 'クリック'], text: '選んでいる機体に足す。選んでいる機体なら外す' },
+      { keys: ['Shift', '+', '左ドラッグ'], text: '四角で囲んだ機体を選ぶ(選んでいる機体に足す)' },
+      { keys: ['1', '〜', '8'], text: 'その番号の機体を選ぶ(Shift で足す)。Tab で次の機体を選ぶ' },
+      { keys: ['右クリック'], text: '選んでいる機体に、その場所の区画を刈らせる(自動運転で向かう。何台かなら分担する。刈り終えた区画はもう一度刈る)' },
+      { keys: ['Esc'], text: '選ぶのをやめる' },
+      { keys: ['P'], text: '選んでいる機体の自動運転の開始と停止(選んでいなければ全台)' },
+      { keys: ['左ドラッグ', '右ドラッグ', 'ホイール', '↑', '←', '↓', '→'], text: '誰にも乗っていない俯瞰と同じく、回り込む、動かす、寄る' }
+    ]
+  },
+  {
     title: '運転',
     items: [
       { keys: ['W', '↑'], text: '前進' },
@@ -1421,10 +1532,9 @@ const toggleHelp = setupHelp([
   {
     title: '視点',
     items: [
-      { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰、定点)' },
-      { keys: ['右ドラッグ'], text: '定点の視点で、カメラの位置を動かす' },
-      { keys: ['W', 'A', 'S', 'D'], text: 'ドローン、定点、俯瞰の視点で、カメラを回す(A / D で左右、W / S で傾き)。運転は矢印キー' },
-      { keys: ['Q', 'E'], text: 'ドローン、定点、俯瞰の視点で、自動の旋回。押すたびに速さが 1 段変わる(E が右回り、5 段まで)' },
+      { keys: ['C'], text: '視点を切り替える(追従、ドローン、俯瞰、管制)' },
+      { keys: ['W', 'A', 'S', 'D'], text: 'ドローン、俯瞰、管制の視点で、カメラを回す(A / D で左右、W / S で傾き)。運転は矢印キー' },
+      { keys: ['Q', 'E'], text: 'ドローン、俯瞰、管制の視点で、自動の旋回。押すたびに速さが 1 段変わる(E が右回り、5 段まで)' },
       { keys: ['左ドラッグ'], text: '機体を中心に回り込む(追従視点では、離して 2 秒で背後に戻る)' },
       { keys: ['ホイール'], text: 'カメラを近づける、離す(画角は変わらない)' }
     ]
@@ -1482,8 +1592,14 @@ input.onPress('Tab', () => {
 })
 input.onPress('Escape', () => {
   if (dialogOpen()) return false
-  leaveMower()
+  // 管制の視点では、選ぶのをやめる
+  if (rig.mode === 'command') {
+    selection = []
+    selectionChanged()
+  } else leaveMower()
 })
+/** Shift を押しているか(管制の視点で、選んでいる機体に足すとき) */
+const shiftDown = (): boolean => input.isDown('ShiftLeft') || input.isDown('ShiftRight')
 
 /** 画面の上の点(クライアント座標)の近くに写っている機体。なければ null */
 function mowerAtScreen(clientX: number, clientY: number): MowerUnit | null {
@@ -1509,8 +1625,38 @@ function mowerAtScreen(clientX: number, clientY: number): MowerUnit | null {
   return best
 }
 
+/** 画面の上の点(クライアント座標)に写っている地面の位置。視線を少しずつ進めて探す。当たらなければ null */
+function groundAtScreen(clientX: number, clientY: number): Vector3 | null {
+  const rect = canvas.getBoundingClientRect()
+  const ray = new Vector3(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    1 - ((clientY - rect.top) / rect.height) * 2,
+    0.5
+  )
+    .unproject(rig.camera)
+    .sub(rig.camera.position)
+    .normalize()
+  const point = rig.camera.position.clone()
+  for (let travelled = 0; travelled < 3000; travelled += 1) {
+    point.add(ray)
+    if (point.y <= terrain.heightAt(point.x, point.z)) return point
+  }
+  return null
+}
+
+/** 機体が画面のどこに写っているか(クライアント座標)。カメラの後ろなら null */
+function mowerOnScreen(unit: MowerUnit): { x: number; y: number } | null {
+  const rect = canvas.getBoundingClientRect()
+  const { x, z } = unit.state
+  const point = new Vector3(x, terrain.heightAt(x, z) + 1, z).project(rig.camera)
+  if (point.z > 1) return null
+  return { x: rect.left + ((point.x + 1) / 2) * rect.width, y: rect.top + ((1 - point.y) / 2) * rect.height }
+}
+
 // クリック: 芝刈り機の上なら、その機体に乗る(乗り移る)。
-// 区画を表示している間は、地面をクリックして、乗っている機体の刈る区画を選べる(ドラッグは視点の操作なので除く)
+// 区画を表示している間は、地面をクリックして、乗っている機体の刈る区画を選べる(ドラッグは視点の操作なので除く)。
+// 管制の視点では、クリックで機体を選び(Shift で足す・外す)、何もない所のクリックで選ぶのをやめる。
+// 地面の右クリックで、選んでいる機体にその場所の区画を刈らせる
 {
   let downX = 0
   let downY = 0
@@ -1519,52 +1665,131 @@ function mowerAtScreen(clientX: number, clientY: number): MowerUnit | null {
     downY = e.clientY
   })
   canvas.addEventListener('pointerup', (e) => {
-    if (e.button !== 0 || input.isDown('KeyL')) return
+    if (input.isDown('KeyL')) return
     if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) return
+    if (rig.mode === 'command') {
+      if (e.button === 0) {
+        const picked = mowerAtScreen(e.clientX, e.clientY)
+        if (picked) pickMower(picked, false)
+        else if (selection.length > 0) {
+          selection = []
+          selectionChanged()
+        }
+      } else if (e.button === 2 && selection.length > 0) {
+        const point = groundAtScreen(e.clientX, e.clientY)
+        if (!point) return
+        if (plotting.dirty || !plotting.result) updatePlots()
+        const id = plotAt(point.x, point.z)
+        if (id >= 0) orderPlot(selection, id)
+      }
+      return
+    }
+    if (e.button !== 0) return
     const picked = mowerAtScreen(e.clientX, e.clientY)
     if (picked) {
-      if (picked !== rider) boardMower(picked)
+      pickMower(picked, false)
       return
     }
     if (!route.show || !rider) return
-    // 視線を少しずつ進め、地面に当たった所の区画を選ぶ
-    const rect = canvas.getBoundingClientRect()
-    const ray = new Vector3(
-      ((e.clientX - rect.left) / rect.width) * 2 - 1,
-      1 - ((e.clientY - rect.top) / rect.height) * 2,
-      0.5
-    )
-      .unproject(rig.camera)
-      .sub(rig.camera.position)
-      .normalize()
-    const point = rig.camera.position.clone()
-    for (let travelled = 0; travelled < 3000; travelled += 1) {
-      point.add(ray)
-      if (point.y > terrain.heightAt(point.x, point.z)) continue
-      const id = plotAt(point.x, point.z)
-      if (id >= 0 && id !== rider.plot) selectPlot(id)
-      return
-    }
+    // 地面に当たった所の区画を選ぶ
+    const point = groundAtScreen(e.clientX, e.clientY)
+    if (!point) return
+    const id = plotAt(point.x, point.z)
+    if (id >= 0 && id !== rider.plot) selectPlot(id)
   })
 }
-// ドローン、定点、俯瞰の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
+
+// 管制の視点: Shift を押しながら左ドラッグで、四角で囲んだ機体を選ぶ(選んでいる機体に足す)。
+// ほとんど動かさずに離したときは、Shift+クリックとして、その機体を足す・外す。
+// 視点のドラッグより先に受け取り、その間はカメラを動かさない
+{
+  const box = byId('select-box')
+  let boxPointer: number | null = null
+  let startX = 0
+  let startY = 0
+  const rectOf = (e: PointerEvent): { left: number; top: number; right: number; bottom: number } => ({
+    left: Math.min(startX, e.clientX),
+    top: Math.min(startY, e.clientY),
+    right: Math.max(startX, e.clientX),
+    bottom: Math.max(startY, e.clientY)
+  })
+  canvas.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (rig.mode !== 'command' || e.button !== 0 || !e.shiftKey || input.isDown('KeyL')) return
+      e.stopImmediatePropagation()
+      e.preventDefault()
+      boxPointer = e.pointerId
+      startX = e.clientX
+      startY = e.clientY
+      rig.suspendControls(true)
+      canvas.setPointerCapture(e.pointerId)
+    },
+    { capture: true }
+  )
+  canvas.addEventListener(
+    'pointermove',
+    (e) => {
+      if (e.pointerId !== boxPointer) return
+      e.stopImmediatePropagation()
+      const r = rectOf(e)
+      box.hidden = r.right - r.left < 4 && r.bottom - r.top < 4
+      box.style.left = `${r.left}px`
+      box.style.top = `${r.top}px`
+      box.style.width = `${r.right - r.left}px`
+      box.style.height = `${r.bottom - r.top}px`
+    },
+    { capture: true }
+  )
+  const endBox = (e: PointerEvent): void => {
+    if (e.pointerId !== boxPointer) return
+    e.stopImmediatePropagation()
+    boxPointer = null
+    box.hidden = true
+    rig.suspendControls(false)
+    if (e.type === 'pointercancel') return
+    const r = rectOf(e)
+    if (r.right - r.left < 4 && r.bottom - r.top < 4) {
+      const picked = mowerAtScreen(e.clientX, e.clientY)
+      if (picked) pickMower(picked, true)
+      return
+    }
+    const inside = mowers.filter((unit) => {
+      const p = mowerOnScreen(unit)
+      return p !== null && p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom
+    })
+    const added = inside.filter((unit) => !selection.includes(unit))
+    if (added.length === 0) return
+    selection = [...selection, ...added]
+    selectionChanged()
+  }
+  canvas.addEventListener('pointerup', endBox, { capture: true })
+  canvas.addEventListener('pointercancel', endBox, { capture: true })
+}
+// ドローン、俯瞰、管制の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
 input.onPress('KeyE', () => rig.stepOrbit(1))
 input.onPress('KeyQ', () => rig.stepOrbit(-1))
 
-// 上中央の案内。ドローン、定点、俯瞰の視点では、その視点の操作と、自動の旋回の様子を出す
+// 上中央の案内。ドローン、俯瞰、管制の視点では、その視点の操作と、自動の旋回の様子を出す
 const viewHint = byId('view-hint')
 const viewHintText = viewHint.textContent ?? ''
 function updateViewHint(): void {
   let text = viewHintText
   const level = rig.orbitLevel
   const orbiting = `旋回中 ${level > 0 ? '右回り' : '左回り'} 速さ ${Math.abs(level)} / ${ORBIT_LEVELS}(Q / E で速さと向き、W / A / S / D で回転と傾き)`
-  if (!rider) {
+  if (rig.mode === 'command') {
+    const chosen = selection.length > 0 ? `${selection.map((m) => m.name).join('、')}を選択中。右クリックで、その場所の区画を刈らせる。` : ''
+    text =
+      level === 0
+        ? `管制: ${chosen}クリックで選ぶ(Shift で足す、Shift+ドラッグで囲む)、Esc で選ぶのをやめる。W / A / S / D で回す、右ドラッグか矢印キーで動かす、ホイールで寄る`
+        : orbiting
+  } else if (!rider) {
     text =
       level === 0
         ? '俯瞰: 芝刈り機をクリックで乗る。W / A / S / D で回す、Q / E で自動の旋回、右ドラッグか矢印キーで動かす、ホイールで寄る、P で全台の自動運転'
         : orbiting
   } else if (rig.armControls) {
-    const view = rig.mode === 'fixed' ? '定点' : rig.mode === 'top' ? '俯瞰' : 'ドローン'
+    const view = rig.mode === 'top' ? '俯瞰' : 'ドローン'
     text = level === 0 ? `${view}の視点: W / A / S / D でカメラを回す、Q / E で自動の旋回、矢印キーで運転` : orbiting
   } else {
     text = `${rider.name}: W / S で前後、A / D で操舵、Space で刈刃、C で視点、Tab で乗り移る、Esc で降りる、? で操作の一覧`
@@ -1979,7 +2204,7 @@ for (let i = 0; i < MAX_MOWERS; i++) {
   input.onPress(`Digit${i + 1}`, () => {
     if (dialogOpen()) return false
     const unit = mowers[i]
-    if (unit && unit !== rider) boardMower(unit)
+    if (unit) pickMower(unit, shiftDown())
   })
 }
 // 右の列のパネルの値を、前回の値に戻す(次の起動のために保存もする)。
@@ -1991,7 +2216,7 @@ syncUi()
 // ------------------------------------------------ シミュレーション
 
 function stepSimulation(): void {
-  // 手で運転するのは、乗っている機体だけ。ドローン、定点、俯瞰の視点では、W / A / S / D はカメラを回すのに使い、運転は矢印キーで行う
+  // 手で運転するのは、乗っている機体だけ。ドローンと俯瞰の視点では、W / A / S / D はカメラを回すのに使い、運転は矢印キーで行う
   const manual = rider && !rider.autoDrive ? input.read(!rig.armControls) : IDLE_INPUT
   const ctx: StepContext = {
     terrain,
@@ -2044,11 +2269,14 @@ function updateReadouts(dt: number, workMs: number): void {
   if (dt > 0) fps += (1 / dt - fps) * 0.05
   frameMs += (workMs - frameMs) * 0.05
   const s = rig.settings
-  // 機体ごとの値は、乗っている機体のもの。刈った面積は全台の合計
-  const unit = rider
+  // 機体ごとの値は、乗っている機体(管制の視点では 1 台だけ選んでいる機体)のもの。刈った面積は全台の合計
+  const unit = focusedMower()
   const driving = mowers.filter((m) => m.autoDrive).length
+  const chosen = selection.length > 1 ? `${selection.length} 台を選択` : null
   setStatus({
-    mower: unit ? `${unit.name}${unit.autoDrive ? '(自動)' : ''}` : `なし(自動 ${driving} / ${mowers.length} 台)`,
+    mower: unit
+      ? `${unit.name}${unit.autoDrive ? '(自動)' : ''}${rider ? '' : ' を選択'}`
+      : (chosen ?? `なし(自動 ${driving} / ${mowers.length} 台)`),
     speed: unit ? `${(unit.state.speed * 3.6).toFixed(1)} km/h` : '-',
     deck: unit ? (unit.state.deckDown ? '下げ' : '上げ') : '-',
     area: `${coverage.coveredArea.toFixed(0)} m²`,
@@ -2329,7 +2557,17 @@ function frame(now: number): void {
     unit.model.sync(unit.state, simSeconds, terrain)
     unit.followCamera(dt, timeSettings.timelapse)
   }
-  // ドローン、定点、俯瞰の視点では W / A / S / D でカメラを回す。誰にも乗っていない俯瞰では、矢印キーで見る場所を動かす
+  selectionRings.update(
+    selection.map((unit) => ({
+      id: unit.index,
+      // 機体の位置は後ろ寄りなので、カメラの注視点と同じく前へ 1.2 m ずらして、車体の中ほどを囲む
+      x: unit.state.x + Math.sin(unit.state.heading) * 1.2,
+      z: unit.state.z + Math.cos(unit.state.heading) * 1.2,
+      color: RING_COLORS[unit.index % RING_COLORS.length]
+    })),
+    dt
+  )
+  // ドローン、俯瞰、管制の視点では W / A / S / D でカメラを回す。誰にも乗っていない俯瞰と管制では、矢印キーで見る場所を動かす
   if (rig.armControls) rig.setArmInput(input.axis(['KeyD'], ['KeyA']), input.axis(['KeyW'], ['KeyS']))
   else rig.setArmInput(0, 0)
   if (!rider) {
@@ -2376,7 +2614,7 @@ function frame(now: number): void {
     lighting.settings.sunElevation
   )
 
-  // ピントは機体に合わせる(定点の視点では、画面の中央に見えている地面)。視線に沿った距離で持つ
+  // ピントは機体に合わせる(誰にも乗っていないときと管制の視点では、見ている場所)。視線に沿った距離で持つ
   const s = rig.settings
   const focusTarget = Math.max(
     0.5,

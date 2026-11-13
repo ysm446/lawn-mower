@@ -71,6 +71,8 @@ export class MowerUnit {
   plot = -1
   /** 分担して刈るとき、自分の分を刈り終えた区画(ほかの機体がまだ刈っていても、もう加わらない)。-1 はなし */
   finishedPlot = -1
+  /** 管制の視点で区画を指示されたか。指示された区画は、刈り終えるまでほかの区画に移らない(ほかの機体と重なっても分担して刈る) */
+  ordered = false
   readonly route: RouteState = {
     dirty: true,
     plan: null,
@@ -120,6 +122,7 @@ export class MowerUnit {
     this.distance = 0
     this.plot = -1
     this.finishedPlot = -1
+    this.ordered = false
     this.route.team = []
     this.route.dirty = true
     this.route.plan = null

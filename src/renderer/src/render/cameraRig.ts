@@ -22,7 +22,7 @@ const CHASE_ELEVATION = Math.atan2(CHASE_UP, CHASE_BACK)
 /** ドラッグをやめてから、背後に戻り始めるまでの時間(秒) */
 const CHASE_RETURN_DELAY = 2
 
-// 定点の視点のキー操作。weather-globe の旋回モードに合わせてある。
+// ドローン、俯瞰、管制の視点のキー操作。weather-globe の旋回モードに合わせてある。
 // Q / E: 1 回押すごとに自動の旋回の段を変える。手を離しても回り続ける
 /** 自動の旋回の段の数(右回りと左回りのそれぞれ) */
 export const ORBIT_LEVELS = 5
@@ -63,15 +63,15 @@ function orbitDegreesPerSecond(throttle: number): number {
   return Math.sign(throttle) * rate
 }
 
-export type CameraMode = 'chase' | 'orbit' | 'top' | 'fixed'
+export type CameraMode = 'chase' | 'orbit' | 'top' | 'command'
 
-export const CAMERA_MODES: CameraMode[] = ['chase', 'orbit', 'top', 'fixed']
+export const CAMERA_MODES: CameraMode[] = ['chase', 'orbit', 'top', 'command']
 
 export const CAMERA_MODE_LABELS: Record<CameraMode, string> = {
   chase: '追従',
   orbit: 'ドローン',
   top: '俯瞰',
-  fixed: '定点'
+  command: '管制'
 }
 
 /** 視点ごとの焦点距離の初期値(mm) */
@@ -79,16 +79,13 @@ const MODE_FOCAL_LENGTH: Record<CameraMode, number> = {
   chase: 28,
   orbit: 50,
   top: 85,
-  fixed: 50
+  command: 85
 }
 
-/** ドローンと定点の視点で、見る点から離れられる距離の上限(m) */
+/** ドローンの視点と、機体に乗ったままの俯瞰で、見る点から離れられる距離の上限(m) */
 const DRONE_MAX_DISTANCE = 600
-/** 誰にも乗っていないときの俯瞰で、見る点から離れられる距離の上限(m) */
+/** 誰にも乗っていないときの俯瞰と、管制の視点で、見る点から離れられる距離の上限(m) */
 const FREE_MAX_DISTANCE = 1500
-
-/** 定点の視点で、画面の中央の地面を探す距離の上限(m)。空を見ているときのピントの距離にもなる */
-const SIGHT_MAX_DISTANCE = 3000
 
 export class CameraRig {
   readonly camera = new PerspectiveCamera(50, 1, 0.3, 6000)
@@ -97,14 +94,13 @@ export class CameraRig {
   private readonly controls: OrbitControls
   private readonly focus = new Vector3()
   private readonly lastFocus = new Vector3()
-  private readonly sight = new Vector3()
   private readonly tmp = new Vector3()
   private readonly arm = new Spherical()
   private initialized = false
-  // 定点の視点の、自動の旋回の段(-ORBIT_LEVELS〜ORBIT_LEVELS。正が右回り)と、なめらかにしたあとの値
+  // ドローン、俯瞰、管制の視点の、自動の旋回の段(-ORBIT_LEVELS〜ORBIT_LEVELS。正が右回り)と、なめらかにしたあとの値
   private orbitStep = 0
   private orbitThrottle = 0
-  // 定点の視点の、キーでアームを回す向き(-1〜1)と、なめらかにしたあとの値
+  // ドローン、俯瞰、管制の視点の、キーでアームを回す向き(-1〜1)と、なめらかにしたあとの値
   private armYawGoal = 0
   private armTiltGoal = 0
   private armYaw = 0
@@ -177,7 +173,7 @@ export class CameraRig {
       if (domElement.hasPointerCapture(e.pointerId)) domElement.releasePointerCapture(e.pointerId)
     }
     // ホイール: 追従視点のカメラを近づける、離す(画角は変えない)。
-    // ドローン視点、定点、俯瞰は OrbitControls が受け持つ
+    // ドローン視点、俯瞰、管制は OrbitControls が受け持つ
     domElement.addEventListener(
       'wheel',
       (e) => {
@@ -205,13 +201,12 @@ export class CameraRig {
     this.mode = mode
     this.keepViewYaw()
     this.settings.focalLength = MODE_FOCAL_LENGTH[mode]
-    // 定点では、機体を追わずにその場に据える。左ドラッグで見回し、右ドラッグで位置を動かせる
-    // (誰にも乗っていない俯瞰は、updateFree で OrbitControls を使う設定にする)
-    // 俯瞰もドローンと同じく、注視点のまわりを回す(機体に乗っているときは機体を、乗っていなければ見ている場所を見る)
-    this.controls.enabled = mode === 'orbit' || mode === 'fixed' || mode === 'top'
-    this.controls.enablePan = mode === 'fixed'
-    this.controls.screenSpacePanning = true
-    this.controls.maxDistance = mode === 'top' ? FREE_MAX_DISTANCE : DRONE_MAX_DISTANCE
+    // 俯瞰もドローンと同じく、注視点のまわりを回す(機体に乗っているときは機体を、乗っていなければ見ている場所を見る)。
+    // 管制は、誰にも乗っていない俯瞰と同じ動き(updateFree で OrbitControls を使う設定にする)
+    this.controls.enabled = mode === 'orbit' || mode === 'command' || mode === 'top'
+    this.controls.enablePan = mode === 'command'
+    this.controls.screenSpacePanning = mode !== 'command'
+    this.controls.maxDistance = mode === 'top' || mode === 'command' ? FREE_MAX_DISTANCE : DRONE_MAX_DISTANCE
     this.chaseYaw = 0
     this.chasePitch = 0
     this.chaseDragging = false
@@ -222,17 +217,17 @@ export class CameraRig {
     this.armTilt = 0
   }
 
-  /** キー(W / A / S / D、Q / E)でカメラを回せる視点か(ドローン、定点、俯瞰) */
+  /** キー(W / A / S / D、Q / E)でカメラを回せる視点か(ドローン、俯瞰、管制) */
   get armControls(): boolean {
-    return this.mode === 'orbit' || this.mode === 'fixed' || this.mode === 'top'
+    return this.mode === 'orbit' || this.mode === 'command' || this.mode === 'top'
   }
 
-  /** ドローンと定点の視点の、自動の旋回の段(正が右回り。カメラが右へ回り込む)。0 は止まっている */
+  /** ドローン、俯瞰、管制の視点の、自動の旋回の段(正が右回り。カメラが右へ回り込む)。0 は止まっている */
   get orbitLevel(): number {
     return this.orbitStep
   }
 
-  /** 自動の旋回の段を step だけ変える。ドローンと定点の視点でだけ働く */
+  /** 自動の旋回の段を step だけ変える。ドローン、俯瞰、管制の視点でだけ働く */
   stepOrbit(step: number): void {
     if (!this.armControls) return
     this.orbitStep = Math.min(Math.max(this.orbitStep + step, -ORBIT_LEVELS), ORBIT_LEVELS)
@@ -244,7 +239,7 @@ export class CameraRig {
     this.armTiltGoal = tilt
   }
 
-  /** ドローンと定点の視点で、自動の旋回とキーの分だけ、注視点のまわりにアームを回す */
+  /** ドローン、俯瞰、管制の視点で、自動の旋回とキーの分だけ、注視点のまわりにアームを回す */
   private turnArm(dt: number): void {
     this.orbitThrottle += (this.orbitStep - this.orbitThrottle) * (1 - Math.exp(-dt / ORBIT_SECONDS))
     if (this.orbitStep === 0 && Math.abs(this.orbitThrottle) < 1e-3) this.orbitThrottle = 0
@@ -287,11 +282,11 @@ export class CameraRig {
   }
 
   /**
-   * 機体から降りたときに呼ぶ。どの視点からでも、カメラを今の位置と向き(焦点距離も)のまま止め、
-   * 誰にも乗っていない俯瞰にする。その後は、見ている先の地面のまわりを回したり動かしたりできる。
+   * 機体から降りたとき、管制の視点に入るとき・出るときに呼ぶ。どの視点からでも、カメラを今の位置と向き(焦点距離も)のまま止め、
+   * 誰にも乗っていない俯瞰(mode が 'command' なら管制)にする。その後は、見ている先の地面のまわりを回したり動かしたりできる。
    * 自動の旋回も止める。視線が地面に当たらないとき(空を見ているとき)は、around の点までの距離の所を見ているとする
    */
-  stopHere(terrain: Terrain, around: Vector3): void {
+  stopHere(terrain: Terrain, around: Vector3, mode: 'top' | 'command' = 'top'): void {
     const cam = this.camera
     // 移る途中なら、今見えている(混ぜた)位置と向きのまま止める
     this.transition = -1
@@ -309,7 +304,7 @@ export class CameraRig {
     controls.enablePan = true
     controls.screenSpacePanning = false
     controls.maxDistance = FREE_MAX_DISTANCE
-    this.mode = 'top'
+    this.mode = mode
     this.freeFocus.set(controls.target.x, 0, controls.target.z)
     this.focus.copy(controls.target)
     this.lastFocus.copy(controls.target)
@@ -416,7 +411,7 @@ export class CameraRig {
 
   /**
    * 追う機体を変えたときに呼ぶ。追従は新しい機体の位置から決め直し(移る途中は beginTransition で混ぜる)、
-   * 定点は据えたカメラのまま新しい機体を見る。ドローンと俯瞰は機体との位置関係を保ったまま移る
+   * ドローンと俯瞰は機体との位置関係を保ったまま移る
    */
   retarget(): void {
     if (this.mode !== 'orbit' && this.mode !== 'top') this.initialized = false
@@ -463,8 +458,9 @@ export class CameraRig {
 
     const wasFree = this.free
     this.free = target === null
-    if (target === null) {
-      if (this.mode !== 'top') this.setMode('top')
+    // 誰にも乗っていないときと管制の視点は、見ている場所を動かす(機体を追わない)
+    if (target === null || this.mode === 'command') {
+      if (this.mode !== 'top' && this.mode !== 'command') this.setMode('top')
       this.updateFree(dt, terrain)
       return
     }
@@ -517,22 +513,10 @@ export class CameraRig {
         cam.position.add(this.tmp)
         this.controls.target.add(this.tmp)
       }
-      // 定点と同じく、キーと自動の旋回で、機体のまわりにアームを回す
+      // 俯瞰と同じく、キーと自動の旋回で、機体のまわりにアームを回す
       this.turnArm(dt)
       this.controls.update()
       this.keepAboveGround(terrain)
-    } else if (this.mode === 'fixed') {
-      // 切り替えた時点のカメラの位置に据え、機体のいた所を見る。その後は機体を追わない
-      if (!this.initialized) {
-        if (cam.position.lengthSq() === 0) {
-          cam.position.set(this.focus.x - 30, this.focus.y + 18, this.focus.z - 36)
-        }
-        this.controls.target.copy(this.focus)
-      }
-      this.turnArm(dt)
-      this.controls.update()
-      this.keepAboveGround(terrain)
-      this.findSight(terrain)
     } else {
       // 俯瞰: ドローンと同じく機体を追いかけ、キーと自動の旋回とドラッグで、機体のまわりにアームを回す。
       // 誰にも乗っていない俯瞰から乗ったときは、見ていた場所との位置関係のまま機体へ移る(lastFocus は見ていた場所)
@@ -581,19 +565,13 @@ export class CameraRig {
     if (p.y < floor) p.y = floor
   }
 
-  /**
-   * 画面の中央の視線が地面に当たる点を sight に入れる(定点の視点のピント用)。
-   * 地面に当たらない(空を見ている)ときは、遠くの点にする
-   */
-  private findSight(terrain: Terrain): void {
-    const p = this.camera.position
-    const d = this.camera.getWorldDirection(this.tmp)
-    const t = terrain.rayDistance(p.x, p.y, p.z, d.x, d.y, d.z, SIGHT_MAX_DISTANCE)
-    this.sight.set(p.x + d.x * t, p.y + d.y * t, p.z + d.z * t)
+  /** 管制の視点で、範囲選択のドラッグの間だけ、ドラッグでカメラを動かさないようにする */
+  suspendControls(on: boolean): void {
+    if (this.mode === 'command') this.controls.enabled = !on
   }
 
-  /** ピントを合わせる点。定点の視点では画面の中央に見えている地面、ほかの視点では機体 */
+  /** ピントを合わせる点。乗っている機体、誰にも乗っていないときと管制の視点では見ている場所 */
   get focusPoint(): Vector3 {
-    return this.mode === 'fixed' && this.initialized ? this.sight : this.focus
+    return this.focus
   }
 }

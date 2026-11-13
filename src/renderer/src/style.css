@@ -360,6 +360,20 @@ button:active:not(:disabled) {
   border-radius: 8px;
 }
 
+/* 管制の視点の範囲選択(Shift+左ドラッグ)の四角 */
+#select-box {
+  position: fixed;
+  z-index: 5;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: rgba(230, 230, 230, 0.08);
+  pointer-events: none;
+}
+
+#select-box[hidden] {
+  display: none;
+}
+
 /* 太陽の向きのギズモ。画面の全体に重ね、操作は後ろの画面へ通す */
 #sun-gizmo {
   position: fixed;
