@@ -22,6 +22,7 @@ import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
 import { OVERLAY_PALETTE, overlayColor, overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
+import { PlotHover } from './render/plotHover'
 import { SelectionRings } from './render/selectionRings'
 import { Trees } from './render/trees'
 import { enhanceSelect } from './customSelect'
@@ -213,6 +214,9 @@ scene.add(plotOverlay.lines)
 // 管制の視点で選んでいる機体のまわりの輪
 const selectionRings = new SelectionRings(terrain)
 scene.add(selectionRings.fill, selectionRings.outline.mesh)
+// 管制の視点で機体を選んでいる間、マウスの下の区画を浮かび上がらせる(右クリックで指示する行き先)
+const plotHover = new PlotHover(terrain)
+scene.add(plotHover.lines)
 
 // 刈る前の芝の長さのむら(場所ごとの倍率)
 const grassField = new GrassField({
@@ -330,6 +334,7 @@ function updatePlots(): void {
     unit.ordered = false
   }
   plotOverlay.update(result)
+  plotHover.setResult(result)
   refreshPlotOverlay()
   markRoutesDirty()
 }
@@ -695,10 +700,36 @@ function refreshPathLines(): void {
   for (const unit of mowers) pathLineOf(unit).update(unit.route.plan?.path ?? null)
 }
 /** 経路の線を出すか、走り終えた所までを薄くするかを合わせ、現れたり消えたりする途中を進める。毎フレーム呼ぶ */
+/**
+ * 区画の線を出すか。「区画と経路」の表示がオンのとき。
+ * 管制の視点で機体を選んでいる間も、指示できる区画が分かるよう、表示がオフでも出す
+ */
+function plotLinesShown(): boolean {
+  return route.show || (rig.mode === 'command' && selection.length > 0)
+}
+
+/** 管制の視点で指示した直後、指示した機体の新しい経路を出しておく時間(秒) */
+const ORDER_ROUTE_SECONDS = 1.6
+const orderedRoutes: { units: MowerUnit[]; timer: number } = { units: [], timer: 0 }
+
+/**
+ * 経路の線を出すか。「区画と経路」の表示がオンなら、乗っている機体(誰にも乗っていなければ全台)。
+ * 管制の視点では、表示がオフでも、選んでいる機体と指示した直後の機体のうち、自動運転中のものを出す
+ */
+function pathShown(unit: MowerUnit): boolean {
+  if (route.show && (!rider || unit === rider)) return true
+  if (rig.mode !== 'command' || !unit.autoDrive) return false
+  return selection.includes(unit) || (orderedRoutes.timer > 0 && orderedRoutes.units.includes(unit))
+}
+
 function syncPathLines(dt: number): void {
+  if (orderedRoutes.timer > 0) {
+    orderedRoutes.timer -= dt
+    if (orderedRoutes.timer <= 0) orderedRoutes.units = []
+  }
   for (const unit of mowers) {
     const line = pathLineOf(unit)
-    line.visible = route.show && (!rider || unit === rider)
+    line.visible = pathShown(unit)
     const follower = unit.route.follower
     line.done = follower && (unit.autoDrive || follower.segment > 0) ? follower.progress : 0
     line.tick(dt)
@@ -1254,7 +1285,7 @@ syncs.push(
   addPanelToggle(byId('route-panel'), '区画と経路', 'G', () => route.show, setRouteShow),
 
   () => {
-    plotOverlay.visible = route.show
+    plotOverlay.visible = plotLinesShown()
   },
   addSlider(routeFields, {
     label: '台数',
@@ -1541,7 +1572,7 @@ const toggleHelp = setupHelp([
       { keys: ['Shift', '+', 'クリック'], text: '選んでいる機体に足す。選んでいる機体なら外す' },
       { keys: ['Shift', '+', '左ドラッグ'], text: '四角で囲んだ機体を選ぶ(選んでいる機体に足す)' },
       { keys: ['1', '〜', '8'], text: 'その番号の機体を選ぶ(Shift で足す)。Tab で次の機体を選ぶ' },
-      { keys: ['右クリック'], text: '選んでいる機体に、その場所の区画を刈らせる(自動運転で向かう。何台かなら分担する。刈り終えた区画はもう一度刈る)' },
+      { keys: ['右クリック'], text: '選んでいる機体に、その場所の区画を刈らせる(自動運転で向かう。何台かなら分担する。刈り終えた区画はもう一度刈る)。指示すると、選ぶのをやめる' },
       { keys: ['F'], text: '選んでいる機体のいる所へ、見る場所を移す(押した時点の位置へ。機体は追わない。何台かならその真ん中)' },
       { keys: ['Esc'], text: '選ぶのをやめる' },
       { keys: ['P'], text: '選んでいる機体の自動運転の開始と停止(選んでいなければ全台)' },
@@ -1697,7 +1728,7 @@ function mowerOnScreen(unit: MowerUnit): { x: number; y: number } | null {
 // クリック: 芝刈り機の上なら、その機体に乗る(乗り移る)。
 // 区画を表示している間は、地面をクリックして、乗っている機体の刈る区画を選べる(ドラッグは視点の操作なので除く)。
 // 管制の視点では、クリックで機体を選び(Shift で足す・外す)、何もない所のクリックで選ぶのをやめる。
-// 地面の右クリックで、選んでいる機体にその場所の区画を刈らせる
+// 地面の右クリックで、選んでいる機体にその場所の区画を刈らせ、選ぶのをやめる
 {
   let downX = 0
   let downY = 0
@@ -1721,7 +1752,15 @@ function mowerOnScreen(unit: MowerUnit): { x: number; y: number } | null {
         if (!point) return
         if (plotting.dirty || !plotting.result) updatePlots()
         const id = plotAt(point.x, point.z)
-        if (id >= 0) orderPlot(selection, id)
+        if (id < 0) return
+        orderPlot(selection, id)
+        // 指示が通ったサイン: 区画を点滅させ、指示した機体の新しい経路をしばらく出す
+        plotHover.confirm(id, RING_COLORS[selection[0].index % RING_COLORS.length])
+        orderedRoutes.units = [...selection]
+        orderedRoutes.timer = ORDER_ROUTE_SECONDS
+        // 指示を出したら選ぶのをやめる(行き先の区画の表示と輪が残って、うるさくならないように)
+        selection = []
+        selectionChanged()
       }
       return
     }
@@ -1807,6 +1846,40 @@ function mowerOnScreen(unit: MowerUnit): { x: number; y: number } | null {
   canvas.addEventListener('pointerup', endBox, { capture: true })
   canvas.addEventListener('pointercancel', endBox, { capture: true })
 }
+// 管制の視点: マウスの位置を覚えておき、毎フレーム、その下の区画を浮かび上がらせる(updatePlotHover)。
+// 画面の外やパネルの上にあるとき、ボタンを押してドラッグしている間は出さない
+const hoverPointer = { x: 0, y: 0, inside: false, dragging: false }
+canvas.addEventListener('pointermove', (e) => {
+  hoverPointer.x = e.clientX
+  hoverPointer.y = e.clientY
+  hoverPointer.inside = true
+  hoverPointer.dragging = e.buttons !== 0
+})
+canvas.addEventListener('pointerdown', () => (hoverPointer.dragging = true))
+canvas.addEventListener('pointerup', () => (hoverPointer.dragging = false))
+canvas.addEventListener('pointerleave', () => (hoverPointer.inside = false))
+// 動作確認用: hover=0.6,0.4 で、画面のその位置(幅と高さに対する割合)にマウスがあるものとして始める
+{
+  const at = query.get('hover')?.split(',').map(Number)
+  if (at && at.length === 2) {
+    hoverPointer.x = at[0] * window.innerWidth
+    hoverPointer.y = at[1] * window.innerHeight
+    hoverPointer.inside = true
+  }
+}
+function updatePlotHover(dt: number): void {
+  let plot = -1
+  if (rig.mode === 'command' && selection.length > 0 && hoverPointer.inside && !hoverPointer.dragging) {
+    const point = groundAtScreen(hoverPointer.x, hoverPointer.y)
+    if (point) {
+      if (plotting.dirty || !plotting.result) updatePlots()
+      plot = plotAt(point.x, point.z)
+    }
+  }
+  plotHover.show(plot, RING_COLORS[(selection[0]?.index ?? 0) % RING_COLORS.length])
+  plotHover.tick(dt)
+}
+
 // ドローン、俯瞰、管制の視点: Q / E を 1 回押すごとに、自動の旋回の段を変える(E が右回り)
 input.onPress('KeyE', () => rig.stepOrbit(1))
 input.onPress('KeyQ', () => rig.stepOrbit(-1))
@@ -2593,7 +2666,7 @@ function frame(now: number): void {
     (m) => (m.route.dirty || m.route.regroup) && (m.autoDrive || (route.show && (!rider || m === rider)))
   )
   if (needsRoute) updateRoute(needsRoute)
-  else if (plotting.dirty && route.show) updatePlots()
+  else if (plotting.dirty && plotLinesShown()) updatePlots()
 
   profiler?.begin('update')
   for (const unit of mowers) {
@@ -2633,6 +2706,7 @@ function frame(now: number): void {
   if (frameCount++ % 30 === 0) lighting.prepareMaterials(scene)
   syncPathLines(dt)
   plotOverlay.tick(dt)
+  updatePlotHover(dt)
   zoneOverlay.tick(dt)
   grassBlades.update(rig.camera, bladeSettings.show)
   // 法線マップは、読み出しで描画が少し止まるので、0.2 秒ごとに描き直す。誰にも乗っていないときは、見ている所を中心にする
