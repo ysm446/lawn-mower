@@ -774,10 +774,18 @@ input[type='checkbox']:checked {
   border-radius: 8px;
 }
 
+/* 台の上に枠を重ねず、1 枚のパネルに見せる(枠と背景は消し、マウスを乗せたときだけ薄く明るくする) */
 #speed-box .app-select {
   min-width: 76px;
   min-height: 30px;
   font-variant-numeric: tabular-nums;
+  background: transparent;
+  border-color: transparent;
+}
+
+#speed-box .app-select:hover:not(:disabled),
+#speed-box .app-select.open {
+  background: rgba(178, 178, 178, 0.14);
 }
 
 .switch button:hover {
