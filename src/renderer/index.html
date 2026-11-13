@@ -15,7 +15,10 @@
 
     <div id="top-left">
       <section id="status-panel">
-        <dl id="status-readout" class="readout"></dl>
+        <details class="panel-fold" open>
+          <summary>状態</summary>
+          <dl id="status-readout" class="readout"></dl>
+        </details>
       </section>
       <div id="fps-counter"></div>
       <section id="normal-panel" hidden>
@@ -61,12 +64,6 @@
         <details class="panel-fold">
           <summary>光と風</summary>
           <div id="light-fields" class="field-list"></div>
-        </details>
-      </section>
-      <section class="side-panel">
-        <details class="panel-fold">
-          <summary>芝</summary>
-          <div id="grass-fields" class="field-list"></div>
         </details>
       </section>
       <section class="side-panel">

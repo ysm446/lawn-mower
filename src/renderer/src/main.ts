@@ -1059,79 +1059,6 @@ syncs.push(
   })
 )
 
-const grassFields = byId('grass-fields')
-syncs.push(
-  addCheck(
-    grassFields,
-    '芝の葉',
-    '機体のまわりの芝を、葉の 1 枚ずつまで描きます。重いときは外してください',
-    () => bladeSettings.show,
-    (v) => {
-      bladeSettings.show = v
-    }
-  ),
-  addCheck(
-    grassFields,
-    '法線マップを表示',
-    '動作確認用。刈った地面の法線マップを、機体のまわりを真上から見た画像として左上に出します。画像の右が赤、上が緑、地面に垂直な向きが青で、平らな所は青紫に見えます',
-    () => debugSettings.normals,
-    (v) => {
-      debugSettings.normals = v
-      normalPanel.hidden = !v
-    },
-    undefined,
-    // 動作確認用なので保存しない
-    false
-  ),
-  addSlider(grassFields, {
-    label: '法線の強調',
-    title: '法線マップの傾きを何倍に強調して見せるか。刈った芝の傾きは小さく、1 倍では淡い色になります',
-    min: 1,
-    max: 10,
-    step: 1,
-    get: () => normalPreview.gain,
-    set: (v) => {
-      normalPreview.gain = v
-    },
-    format: (v) => `${v.toFixed(0)} 倍`
-  }),
-  addSlider(grassFields, {
-    label: '縞(視線)',
-    title: '芝の倒れた向きと、見る向きの関係でつく明暗の強さ',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    get: () => ground.uniforms.uStripe.value,
-    set: (v) => {
-      ground.uniforms.uStripe.value = v
-    },
-    format: (v) => v.toFixed(2)
-  }),
-  addSlider(grassFields, {
-    label: '縞(太陽)',
-    title: '芝の倒れた向きと、太陽の向きの関係でつく明暗の強さ',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    get: () => ground.uniforms.uTilt.value,
-    set: (v) => {
-      ground.uniforms.uTilt.value = v
-    },
-    format: (v) => v.toFixed(2)
-  }),
-  addSlider(grassFields, {
-    label: '刈高',
-    title: 'これから刈る所の芝丈',
-    min: 5,
-    max: 60,
-    step: 1,
-    get: () => sim.cutHeightMm,
-    set: (v) => {
-      sim.cutHeightMm = v
-    },
-    format: (v) => `${v.toFixed(0)} mm`
-  })
-)
 
 const setZoneReadout = addReadout(byId('zone-readout'), {
   ride: '乗用機',
@@ -1255,6 +1182,18 @@ syncs.push(
       markRoutesDirty()
     }
   ),
+  addSlider(routeFields, {
+    label: '刈高',
+    title: 'これから刈る所の芝丈',
+    min: 5,
+    max: 60,
+    step: 1,
+    get: () => sim.cutHeightMm,
+    set: (v) => {
+      sim.cutHeightMm = v
+    },
+    format: (v) => `${v.toFixed(0)} mm`
+  }),
   addSlider(routeFields, {
     label: '区画の広さ',
     title: '区画 1 つの広さの目安。刈れる範囲を、標高や斜面の向きが似た所どうしで、この広さの区画に分けます',
@@ -1667,6 +1606,13 @@ function applySetting(key: keyof AppSettings): void {
   else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
+  else if (key === 'grassBlades') bladeSettings.show = settings.grassBlades
+  else if (key === 'grassStripe') ground.uniforms.uStripe.value = settings.grassStripe
+  else if (key === 'grassTilt') ground.uniforms.uTilt.value = settings.grassTilt
+  else if (key === 'showNormals') {
+    debugSettings.normals = settings.showNormals
+    normalPanel.hidden = !settings.showNormals
+  } else if (key === 'normalGain') normalPreview.gain = settings.normalGain
   else if (key === 'shadowDistance') {
     lighting.setShadowDistance(settings.shadowDistance)
     treeModels.setShadowDistance(settings.shadowDistance)
@@ -1721,6 +1667,17 @@ const toggleSettings = setupSettings(
           title:
             'ウィンドウの中身(タイトルバーを除く)の大きさ。画面の表示倍率を掛けた、見た目の大きさです。選ぶとすぐに変わり、次の起動もこの大きさで開きます。小さくすると描く画素が減って軽くなります',
           options: WINDOW_SIZES.map((height) => ({ value: height, label: `${(height * 16) / 9} × ${height}` }))
+        }
+      ]
+    },
+    {
+      title: '芝',
+      items: [
+        {
+          type: 'check',
+          key: 'grassBlades',
+          label: '芝の葉',
+          title: '機体のまわりの芝を、葉の 1 枚ずつまで描きます。重いときは外してください'
         },
         {
           type: 'slider',
@@ -1731,6 +1688,26 @@ const toggleSettings = setupSettings(
           max: 60,
           step: 2,
           format: (v) => `${v.toFixed(0)} m`
+        },
+        {
+          type: 'slider',
+          key: 'grassStripe',
+          label: '縞(視線)',
+          title: '芝の倒れた向きと、見る向きの関係でつく明暗の強さ',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          format: (v) => v.toFixed(2)
+        },
+        {
+          type: 'slider',
+          key: 'grassTilt',
+          label: '縞(太陽)',
+          title: '芝の倒れた向きと、太陽の向きの関係でつく明暗の強さ',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          format: (v) => v.toFixed(2)
         }
       ]
     },
@@ -1874,11 +1851,39 @@ const toggleSettings = setupSettings(
           title: 'Ctrl+F12 で録画するとき、マウスポインタも動画に写します。既定は外してあり、画面の上では見えたまま、動画には写りません'
         }
       ]
+    },
+    {
+      title: '動作確認',
+      items: [
+        {
+          type: 'check',
+          key: 'showNormals',
+          label: '法線マップを表示',
+          title:
+            '刈った地面の法線マップを、機体のまわりを真上から見た画像として左上に出します。画像の右が赤、上が緑、地面に垂直な向きが青で、平らな所は青紫に見えます。次の起動ではオフに戻ります'
+        },
+        {
+          type: 'slider',
+          key: 'normalGain',
+          label: '法線の強調',
+          title: '法線マップの傾きを何倍に強調して見せるか。刈った芝の傾きは小さく、1 倍では淡い色になります',
+          min: 1,
+          max: 10,
+          step: 1,
+          format: (v) => `${v.toFixed(0)} 倍`
+        }
+      ]
     }
   ],
   applySetting
 )
 for (const key of Object.keys(settings) as (keyof AppSettings)[]) applySetting(key)
+// 起動時の指定(blades=0、normals=1)は、保存した設定より優先する。設定には書き戻さない
+if (query.get('blades') === '0') bladeSettings.show = false
+if (query.get('normals') === '1') {
+  debugSettings.normals = true
+  normalPanel.hidden = false
+}
 input.onPress('Comma', toggleSettings)
 
 // スクリーンショット(F12、Shift+F12)と録画(Ctrl+F12)の保存の通知。キーはメインプロセスが受け取る

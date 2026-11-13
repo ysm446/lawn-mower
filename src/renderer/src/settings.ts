@@ -13,8 +13,14 @@ export interface AppSettings {
   windowSize: number
   /** 左上に fps を出すか */
   showFps: boolean
+  /** 機体のまわりの芝を、葉の 1 枚ずつまで描くか */
+  grassBlades: boolean
   /** 芝の葉を描く距離(m)。カメラが見ている地面のまわり、この半径まで葉を描く */
   grassDistance: number
+  /** 芝の倒れた向きと、見る向きの関係でつく縞の明暗の強さ */
+  grassStripe: number
+  /** 芝の倒れた向きと、太陽の向きの関係でつく縞の明暗の強さ */
+  grassTilt: number
   /** 影を描く距離(m) */
   shadowDistance: number
   /** 影の段数(カスケードシャドウマップの段の数)。段ごとに影の地図を 1 枚使う */
@@ -43,6 +49,10 @@ export interface AppSettings {
   recordingFps: number
   /** 録画にマウスポインタを写すか */
   recordingCursor: boolean
+  /** 動作確認用: 刈った地面の法線マップを左上に出すか(次の起動には引き継がない) */
+  showNormals: boolean
+  /** 動作確認用: 法線マップの傾きを何倍に強調して見せるか */
+  normalGain: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -50,7 +60,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pixelRatio: 2,
   windowSize: 1080,
   showFps: true,
+  grassBlades: true,
   grassDistance: 20,
+  grassStripe: 0.18,
+  grassTilt: 0.2,
   shadowDistance: 220,
   shadowCascades: 3,
   shadowMapSize: 2048,
@@ -64,21 +77,42 @@ export const DEFAULT_SETTINGS: AppSettings = {
   swayTimeScale: 1,
   showHint: true,
   recordingFps: 30,
-  recordingCursor: false
+  recordingCursor: false,
+  showNormals: false,
+  normalGain: 4
 }
 
 const STORAGE_KEY = 'lawn-mower-settings'
+/** 保存はするが、次の起動では戻さない項目(動作確認用の表示) */
+const TRANSIENT_KEYS: (keyof AppSettings)[] = ['showNormals']
+/** 以前は右の列の「芝」パネルにあった項目。設定に値が無ければ、パネルの保存(ui.ts)から引き継ぐ */
+const LEGACY_PANEL_KEYS: Partial<Record<keyof AppSettings, string>> = {
+  grassBlades: 'grass-fields/芝の葉',
+  grassStripe: 'grass-fields/縞(視線)',
+  grassTilt: 'grass-fields/縞(太陽)',
+  normalGain: 'grass-fields/法線の強調'
+}
 
 /** 保存してある設定を読む。無い項目や型の合わない項目は、既定値にする */
 export function loadSettings(): AppSettings {
   const settings = { ...DEFAULT_SETTINGS }
   try {
     const saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '{}') as Record<string, unknown>
+    const legacy = JSON.parse(window.localStorage.getItem('lawn-mower-panels') ?? '{}') as Record<string, unknown>
+    let migrated = false
+    for (const [key, panelKey] of Object.entries(LEGACY_PANEL_KEYS)) {
+      if (saved[key] !== undefined || !panelKey || legacy[panelKey] === undefined) continue
+      saved[key] = legacy[panelKey]
+      migrated = true
+    }
     for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
+      if (TRANSIENT_KEYS.includes(key)) continue
       if (typeof saved[key] === typeof DEFAULT_SETTINGS[key]) {
         ;(settings as unknown as Record<string, unknown>)[key] = saved[key]
       }
     }
+    // パネルの保存は、次に保存するとき芝の項目が抜けるので、引き継いだらすぐ設定に書いておく
+    if (migrated) saveSettings(settings)
   } catch {
     // 読めないときは既定値のまま使う
   }

@@ -141,6 +141,13 @@ button:active:not(:disabled) {
   padding: 10px 16px;
   background: var(--panel);
   border-radius: 8px;
+  pointer-events: auto;
+}
+
+/* 閉じているときは見出しの幅まで縮める(右の列のパネルと同じ) */
+#status-panel:has(> .panel-fold:not([open])) {
+  width: max-content;
+  padding-block: 6px;
 }
 
 .readout {
@@ -176,7 +183,7 @@ button:active:not(:disabled) {
   border-radius: 6px;
 }
 
-/* 動作確認用: 刈った地面の法線マップ(「芝」パネルの「法線マップを表示」) */
+/* 動作確認用: 刈った地面の法線マップ(設定の「動作確認」の「法線マップを表示」) */
 #normal-panel {
   width: 220px;
   padding: 10px 16px 12px;
@@ -855,7 +862,7 @@ body.minimal-ui #top-center {
 
 /* 設定ウインドウ。タブで分けたセクションに項目を並べる */
 #settings {
-  width: min(560px, calc(100vw - 32px));
+  width: min(760px, calc(100vw - 32px));
 }
 
 #settings-tabs {
