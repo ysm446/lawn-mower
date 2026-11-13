@@ -13,6 +13,7 @@ import {
   toggleVideoSize,
   watchWindowTitle
 } from './recording'
+import { initMusic, registerAudioScheme } from './music'
 
 // 動作確認用の環境変数:
 //   LM_QUERY            レンダラーに渡すクエリ文字列(例: "auto=1&timescale=16&cam=orbit")
@@ -42,6 +43,9 @@ if (screenshotPath) {
   }
   app.setPath('userData', join(root, `run-${process.pid}`))
 }
+
+// 音楽の音源を読む口(music.ts)。app の準備ができる前に登録する必要がある
+registerAudioScheme()
 
 // 保存するもの(スクリーンショット、録画)の置き場所。アプリのフォルダの data/(Git の管理に入れない)
 function dataDir(): string {
@@ -169,6 +173,7 @@ function createWindow(): void {
 
 void app.whenReady().then(() => {
   initRecording(recordingDir())
+  initMusic()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

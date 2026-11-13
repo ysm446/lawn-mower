@@ -51,6 +51,8 @@ export interface AppSettings {
   recordingFps: number
   /** 録画にマウスポインタを写すか */
   recordingCursor: boolean
+  /** 音楽の音量(0〜1。右上の音楽のボタンの音量バーで変える) */
+  musicVolume: number
   /** 動作確認用: 刈った地面の法線マップを左上に出すか(次の起動には引き継がない) */
   showNormals: boolean
   /** 動作確認用: 法線マップの傾きを何倍に強調して見せるか */
@@ -86,6 +88,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showHint: true,
   recordingFps: 60,
   recordingCursor: false,
+  musicVolume: 0.5,
   showNormals: false,
   normalGain: 4,
   defaultsVersion: 4
@@ -182,6 +185,8 @@ export type SettingItem =
       format: (value: number) => string
     }
   | { type: 'check'; key: BooleanKey; label: string; title: string }
+  /** 決まった形に当てはまらない項目(音楽の音源の選択など)。中身を作り、画面を合わせ直す関数を返す */
+  | { type: 'custom'; build: (panel: HTMLElement) => Sync }
 
 export interface SettingSection {
   title: string
@@ -190,13 +195,13 @@ export interface SettingSection {
 
 /**
  * 設定ウインドウを作る。settings を書き換え、変わるたびに保存して onChange を呼ぶ。
- * 返す関数で開け閉めする
+ * toggle で開け閉めし、openTab で指定した見出しのタブを開く
  */
 export function setupSettings(
   settings: AppSettings,
   sections: SettingSection[],
   onChange: (key: keyof AppSettings) => void
-): () => void {
+): { toggle: () => void; openTab: (title: string) => void } {
   const dialog = byId<HTMLDialogElement>('settings')
   const tabs = byId('settings-tabs')
   const body = byId('settings-body')
@@ -225,7 +230,9 @@ export function setupSettings(
     panel.className = 'field-list'
     panel.role = 'tabpanel'
     for (const item of section.items) {
-      if (item.type === 'choice') {
+      if (item.type === 'custom') {
+        syncs.push(item.build(panel))
+      } else if (item.type === 'choice') {
         syncs.push(
           addChoice(
             panel,
@@ -291,6 +298,11 @@ export function setupSettings(
     if (dialog.open) dialog.close()
     else dialog.showModal()
   }
+  const openTab = (title: string): void => {
+    const index = sections.findIndex((section) => section.title === title)
+    if (index >= 0) select(index)
+    if (!dialog.open) dialog.showModal()
+  }
   byId('open-settings').addEventListener('click', toggle)
   byId('close-settings').addEventListener('click', () => dialog.close())
   // ウインドウの外側を押したら閉じる
@@ -301,5 +313,5 @@ export function setupSettings(
       e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
     if (!inside) dialog.close()
   })
-  return toggle
+  return { toggle, openTab }
 }

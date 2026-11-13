@@ -339,6 +339,107 @@ button:active:not(:disabled) {
   display: none;
 }
 
+/* 音楽のボタン(weather-globe と同じ)。止まっているときは音符、鳴っているときはスピーカー */
+#music-playing-icon,
+#music-toggle.playing #music-stopped-icon {
+  display: none;
+}
+
+#music-toggle.playing #music-playing-icon {
+  display: block;
+}
+
+/* 音楽のボタンの下に出る縦の音量バー。位置は musicPlayer.ts がボタンに合わせて決める */
+#music-popup {
+  position: fixed;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 36px;
+  padding: 10px 0;
+  background: var(--panel);
+  border-radius: 8px;
+  backdrop-filter: var(--glass);
+  box-shadow: var(--panel-glow);
+}
+
+#music-popup[hidden] {
+  display: none;
+}
+
+/* 知らせがあるときだけ横に広げる */
+#music-popup:has(#music-status:not(:empty)) {
+  width: 220px;
+}
+
+/* 下が 0、上が 100 */
+#music-volume {
+  width: 16px;
+  height: 110px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  writing-mode: vertical-lr;
+  direction: rtl;
+}
+
+#music-volume::-webkit-slider-runnable-track {
+  width: 3px;
+  background: linear-gradient(to top, var(--accent) var(--fill, 0%), rgba(178, 178, 178, 0.28) var(--fill, 0%));
+  border-radius: 2px;
+}
+
+#music-volume::-webkit-slider-thumb {
+  width: 11px;
+  height: 11px;
+  margin-left: -4px;
+  background: var(--accent);
+  border-radius: 50%;
+  appearance: none;
+}
+
+#music-status {
+  margin: 8px 10px 0;
+  font-size: 12px;
+}
+
+#music-status:empty {
+  display: none;
+}
+
+#music-status.error,
+.music-settings-status.error {
+  color: var(--warn);
+}
+
+/* 設定ウインドウの「音楽」タブ。項目の格子の幅いっぱいに並べる */
+.music-settings {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.music-settings .panel-note {
+  margin: 0;
+}
+
+.music-settings .panel-note:empty {
+  display: none;
+}
+
+.music-settings-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.music-settings-buttons button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ------------------------------------------------ 上中央: 操作の案内 */
 
 #top-center {

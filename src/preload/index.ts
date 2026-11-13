@@ -21,5 +21,11 @@ contextBridge.exposeInMainWorld('lawnApi', {
   recordingEnd: (): Promise<string | null> => ipcRenderer.invoke('recording:end'),
   /** ウィンドウの中身の大きさを変える(画面の表示倍率を掛けた、見た目の大きさ) */
   setWindowSize: (width: number, height: number): Promise<void> =>
-    ipcRenderer.invoke('window:set-size', width, height)
+    ipcRenderer.invoke('window:set-size', width, height),
+  /** 選んである音楽の音源のパス。選んでいなければ null */
+  getMusicFile: (): Promise<string | null> => ipcRenderer.invoke('music:get'),
+  /** ファイル選択ダイアログで音源を選ぶ。選んだパスを返し、キャンセルしたら null */
+  chooseMusicFile: (): Promise<string | null> => ipcRenderer.invoke('music:choose'),
+  /** 音源を外す */
+  clearMusicFile: (): Promise<void> => ipcRenderer.invoke('music:clear')
 })

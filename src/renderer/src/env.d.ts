@@ -8,6 +8,9 @@ interface LawnApi {
   recordingChunk(chunk: Uint8Array): Promise<void>
   recordingEnd(): Promise<string | null>
   setWindowSize(width: number, height: number): Promise<void>
+  getMusicFile(): Promise<string | null>
+  chooseMusicFile(): Promise<string | null>
+  clearMusicFile(): Promise<void>
 }
 
 interface Window {

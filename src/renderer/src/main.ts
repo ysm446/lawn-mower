@@ -35,7 +35,8 @@ import { planCoverage, type CoveragePlan, type MowPattern } from './sim/coverage
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
 import { Profiler } from './profiler'
-import { DEFAULT_SETTINGS, loadSettings, setupSettings, type AppSettings } from './settings'
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, setupSettings, type AppSettings } from './settings'
+import { initMusicPlayer } from './musicPlayer'
 import { MAPS, findMap } from './sim/maps'
 import { DEFAULT_TERRAIN, Terrain } from './sim/terrain'
 import { DEFAULT_PLOTS, clusterPlots, type PlotResult } from './sim/plots'
@@ -1980,6 +1981,7 @@ function applySetting(key: keyof AppSettings): void {
   if (key === 'pixelRatio') resize()
   else if (key === 'windowSize') applyWindowSize()
   else if (key === 'showFps') perfPanel.hidden = !settings.showFps
+  else if (key === 'musicVolume') music.syncVolume()
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
   else if (key === 'dofSamples') dofPass.setSamples(settings.dofSamples)
@@ -2007,7 +2009,16 @@ function applySetting(key: keyof AppSettings): void {
     if (!settings.clippings) clippings.clear()
   }
 }
-const toggleSettings = setupSettings(
+// 右上の音楽のボタン(weather-globe と同じ)。音源は設定ウインドウの「音楽」タブで選ぶ
+const music = initMusicPlayer({
+  volume: () => settings.musicVolume,
+  setVolume: (value) => {
+    settings.musicVolume = value
+    saveSettings(settings)
+  },
+  openSettings: () => openSettingsTab('音楽')
+})
+const { toggle: toggleSettings, openTab: openSettingsTab } = setupSettings(
   settings,
   [
     {
@@ -2243,6 +2254,10 @@ const toggleSettings = setupSettings(
       ]
     },
     {
+      title: '音楽',
+      items: [{ type: 'custom', build: (panel) => music.buildSettings(panel) }]
+    },
+    {
       title: '動作確認',
       items: [
         {
@@ -2314,6 +2329,7 @@ initScreenRecorder({
   fps: () => settings.recordingFps,
   // 起動時の指定 reccursor=0 でも写さない(動作確認用)
   cursor: () => settings.recordingCursor && query.get('reccursor') !== '0',
+  audioTrack: () => music.recordingTrack(),
   onSaved: (filePath) => showSavedToast('recording', filePath)
 })
 if (query.get('settings') === '1') toggleSettings()
