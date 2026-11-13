@@ -51,6 +51,12 @@ const ORBIT_BACK = Math.hypot(38, 46)
 /** 初めて置くときの見る向き(上から見て、+z から +x へ回した角度)。これまでの置き方(北東を見下ろす)に合わせる */
 const DEFAULT_VIEW_YAW = Math.atan2(60, 110)
 
+// ドローン、俯瞰、管制のホイール: 回した分を一度にではなく、少しずつ寄せる(引く)
+/** ホイールの 1 単位(deltaY)あたりの距離の変わり方(対数)。OrbitControls の既定の速さに合わせてある */
+const WHEEL_DOLLY_PER_DELTA = 0.0006
+/** 寄せる(引く)動きをならす時定数(秒) */
+const DOLLY_EASE_SECONDS = 0.15
+
 /** 俯瞰で W / A / S / D で動かすとき、動き出しと止まるときをならす時定数(秒) */
 const PAN_EASE_SECONDS = 0.3
 
@@ -112,6 +118,8 @@ export class CameraRig {
   // ホイールで変える距離の倍率(1 が初期の距離)。視点ごとに覚えておく
   private chaseZoom = 1
   private topZoom = 1
+  // ドローン、俯瞰、管制で、ホイールで回したうち、まだ寄せ(引き)終わっていない分(距離の倍率の対数。正が引く)
+  private dollyPending = 0
   // 誰にも乗っていないときの俯瞰で、最初に見る地面の位置(x, z)。
   // その後はドローンの視点と同じく、左ドラッグで回り込み、右ドラッグとキーで動かし、ホイールで寄る
   private readonly freeFocus = new Vector3()
@@ -141,6 +149,8 @@ export class CameraRig {
     this.controls.maxPolarAngle = Math.PI / 2 - 0.03
     this.controls.minDistance = 4
     this.controls.maxDistance = DRONE_MAX_DISTANCE
+    // ホイールはこちらで受けて、なめらかに寄せる(OrbitControls のホイールは一度に動く)
+    this.controls.enableZoom = false
     this.controls.enabled = false
     // ドラッグしている間は、自動の旋回を止める
     this.controls.addEventListener('start', () => {
@@ -172,15 +182,22 @@ export class CameraRig {
       this.chaseIdle = 0
       if (domElement.hasPointerCapture(e.pointerId)) domElement.releasePointerCapture(e.pointerId)
     }
-    // ホイール: 追従視点のカメラを近づける、離す(画角は変えない)。
-    // ドローン視点、俯瞰、管制は OrbitControls が受け持つ
+    // ホイール: カメラを近づける、離す(画角は変えない)。
+    // 追従視点は距離の倍率を変え、ドローン視点、俯瞰、管制は見る点からの距離を少しずつ変える(turnArm で進める)
     domElement.addEventListener(
       'wheel',
       (e) => {
-        if (this.mode !== 'chase') return
+        if (this.mode === 'chase') {
+          e.preventDefault()
+          const factor = Math.exp(e.deltaY * 0.0012)
+          this.chaseZoom = Math.min(Math.max(this.chaseZoom * factor, 0.35), 8)
+          return
+        }
+        if (!this.controls.enabled) return
         e.preventDefault()
-        const factor = Math.exp(e.deltaY * 0.0012)
-        this.chaseZoom = Math.min(Math.max(this.chaseZoom * factor, 0.35), 8)
+        // 行単位、ページ単位で来たときは、ピクセルに直す
+        const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? domElement.clientHeight : 1
+        this.dollyPending += e.deltaY * scale * WHEEL_DOLLY_PER_DELTA
       },
       { passive: false }
     )
@@ -215,6 +232,7 @@ export class CameraRig {
     this.orbitThrottle = 0
     this.armYaw = 0
     this.armTilt = 0
+    this.dollyPending = 0
   }
 
   /** キー(W / A / S / D、Q / E)でカメラを回せる視点か(ドローン、俯瞰、管制) */
@@ -241,6 +259,7 @@ export class CameraRig {
 
   /** ドローン、俯瞰、管制の視点で、自動の旋回とキーの分だけ、注視点のまわりにアームを回す */
   private turnArm(dt: number): void {
+    this.dolly(dt)
     this.orbitThrottle += (this.orbitStep - this.orbitThrottle) * (1 - Math.exp(-dt / ORBIT_SECONDS))
     if (this.orbitStep === 0 && Math.abs(this.orbitThrottle) < 1e-3) this.orbitThrottle = 0
     const ease = 1 - Math.exp(-dt / ARM_EASE_SECONDS)
@@ -259,6 +278,28 @@ export class CameraRig {
     this.arm.theta += (yaw * Math.PI) / 180
     this.arm.phi = Math.min(Math.max(this.arm.phi - (tilt * Math.PI) / 180, ARM_MIN_POLAR), this.controls.maxPolarAngle)
     this.camera.position.setFromSpherical(this.arm).add(target)
+  }
+
+  /** ホイールで回したうち、まだ進めていない分を少しずつ進めて、見る点からの距離を変える */
+  private dolly(dt: number): void {
+    if (this.dollyPending === 0) return
+    const step =
+      Math.abs(this.dollyPending) < 1e-4
+        ? this.dollyPending
+        : this.dollyPending * (1 - Math.exp(-dt / DOLLY_EASE_SECONDS))
+    this.dollyPending -= step
+    const controls = this.controls
+    const offset = this.tmp.copy(this.camera.position).sub(controls.target)
+    const distance = offset.length()
+    if (distance < 1e-6) {
+      this.dollyPending = 0
+      return
+    }
+    const next = distance * Math.exp(step)
+    const clamped = Math.min(Math.max(next, controls.minDistance), controls.maxDistance)
+    // 限界に当たったら、残りは捨てる(押し返されて戻るように見えないように)
+    if (clamped !== next) this.dollyPending = 0
+    this.camera.position.copy(controls.target).addScaledVector(offset, clamped / distance)
   }
 
   /**
@@ -314,6 +355,7 @@ export class CameraRig {
     this.orbitThrottle = 0
     this.armYaw = 0
     this.armTilt = 0
+    this.dollyPending = 0
     this.panX = 0
     this.panY = 0
     // 置き直さずに、この位置から続ける
