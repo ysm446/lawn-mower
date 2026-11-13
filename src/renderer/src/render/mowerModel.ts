@@ -6,15 +6,18 @@
 
 import {
   BoxGeometry,
+  BufferGeometry,
   CylinderGeometry,
   Group,
   Matrix4,
   Mesh,
   MeshStandardMaterial,
   Vector3,
+  type Material,
   type Object3D
 } from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import mowerUrl from '../assets/models/mower.glb?url'
 import type { Terrain } from '../sim/terrain'
 import type { VehicleParams, VehicleState } from '../sim/vehicle'
@@ -275,6 +278,17 @@ export class MowerModel {
         this.reels = reels as Object3D[]
         this.enableShadows(model)
         this.body = this.groupBody(find('mower') ?? model)
+        // 部品(ボルト 1 本、刃 1 枚まで別々で、1 台 170 ほど)を、一緒に動くまとまりごと、材質ごとに 1 つの形にまとめる。
+        // 部品ごとに描くと、画面と影の地図 3 段で 1 台 700 回近く描くことになり、台数が増えると重い
+        mergeRigidParts(model, [
+          model,
+          find('mower'),
+          this.body,
+          this.deck,
+          ...this.allWheels,
+          ...this.frontWheels,
+          ...this.reels
+        ])
         this.root.remove(this.placeholder)
         this.root.add(model)
       },
@@ -346,6 +360,61 @@ export class MowerModel {
     this.disposed = true
     disposeObject(this.root)
     disposeObject(this.placeholder)
+  }
+}
+
+/**
+ * 一緒に動くまとまり(movers。車体、車輪、刈刃、リールなど、sync で動かすもの)ごとに、その下のメッシュを
+ * 材質ごとに 1 つの形にまとめる。メッシュは、いちばん近い祖先のまとまり(自分がまとまりならそれ自身)に属する。
+ * 見た目と動きは変わらない(まとめた形は、まとまりの座標で持つので、まとまりと一緒に動く)。
+ * まとまりそのものがメッシュのとき(子の部品を持つ車輪やリール)は、外せないので、そのメッシュは描かないようにする
+ */
+function mergeRigidParts(model: Object3D, movers: (Object3D | null)[]): void {
+  const owners = new Set(movers.filter((m): m is Object3D => m !== null))
+  model.updateMatrixWorld(true)
+  /** まとまりごと、材質と頂点の属性の組ごとの、まとめるメッシュ */
+  const buckets = new Map<Object3D, Map<string, { material: Material; meshes: Mesh[] }>>()
+  model.traverse((obj) => {
+    if (!(obj instanceof Mesh) || Array.isArray(obj.material)) return
+    let owner: Object3D | null = obj
+    while (owner && !owners.has(owner)) owner = owner.parent
+    if (!owner) return
+    const geometry = obj.geometry as BufferGeometry
+    const key = `${obj.material.uuid}|${geometry.index ? 'i' : 'n'}|${Object.keys(geometry.attributes).sort().join(',')}`
+    let byKey = buckets.get(owner)
+    if (!byKey) buckets.set(owner, (byKey = new Map()))
+    let bucket = byKey.get(key)
+    if (!bucket) byKey.set(key, (bucket = { material: obj.material, meshes: [] }))
+    bucket.meshes.push(obj)
+  })
+  const toOwner = new Matrix4()
+  for (const [owner, byKey] of buckets) {
+    const inverse = new Matrix4().copy(owner.matrixWorld).invert()
+    for (const { material, meshes } of byKey.values()) {
+      if (meshes.length < 2) continue
+      const parts = meshes.map((mesh) => {
+        toOwner.multiplyMatrices(inverse, mesh.matrixWorld)
+        return (mesh.geometry as BufferGeometry).clone().applyMatrix4(toOwner)
+      })
+      const merged = mergeGeometries(parts)
+      for (const part of parts) part.dispose()
+      if (!merged) continue
+      const mesh = new Mesh(merged, material)
+      mesh.name = `${owner.name}_merged`
+      mesh.castShadow = true
+      mesh.receiveShadow = true
+      owner.add(mesh)
+      for (const original of meshes) {
+        original.geometry.dispose()
+        if (owners.has(original) || original.children.length > 0) {
+          // 子を持つメッシュは外せない。描かないようにする(layers は子に効かないので、子は描かれる)
+          original.geometry = new BufferGeometry()
+          original.layers.disableAll()
+        } else {
+          original.removeFromParent()
+        }
+      }
+    }
   }
 }
 
