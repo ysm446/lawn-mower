@@ -39,6 +39,10 @@ export interface RouteState {
   text: { plot: string; area: string; lines: string; cut: string; transit: string; time: string }
   /** 分担して刈るとき、経路を作った時点の組(機体の番号の並び)。組に新しい機体が加わったら作り直す */
   team: number[]
+  /** 経路を作った時点の区画の番号。-1 は区画なし */
+  plot: number
+  /** 組に新しい機体が加わったので、残っている列を分け直す必要があるか(走っている経路は、作り直すまで続ける) */
+  regroup: boolean
 }
 
 /** 1 刻み進めるのに要る、全台で共有するもの */
@@ -69,8 +73,11 @@ export class MowerUnit {
   distance = 0
   /** 自動運転で受け持つ区画の番号。-1 は未定 */
   plot = -1
-  /** 分担して刈るとき、自分の分を刈り終えた区画(ほかの機体がまだ刈っていても、もう加わらない)。-1 はなし */
-  finishedPlot = -1
+  /**
+   * 分担して刈るとき、自分の分を刈り終えた区画と、加わっても分け前がなかった区画
+   * (ほかの機体がまだ刈っていても、もう加わらない)。1 つだけ覚えると、残った区画のあいだを行き来し続ける
+   */
+  readonly finishedPlots = new Set<number>()
   /** 管制の視点で区画を指示されたか。指示された区画は、刈り終えるまでほかの区画に移らない(ほかの機体と重なっても分担して刈る) */
   ordered = false
   readonly route: RouteState = {
@@ -78,7 +85,9 @@ export class MowerUnit {
     plan: null,
     follower: null,
     text: { plot: '-', area: '-', lines: '-', cut: '-', transit: '-', time: '-' },
-    team: []
+    team: [],
+    plot: -1,
+    regroup: false
   }
   readonly model: MowerModel
   /** カメラが追う位置。タイムラプスでは、コマごとに飛ぶ機体をなめらかに追わせる */
@@ -121,9 +130,11 @@ export class MowerUnit {
     this.autoDrive = false
     this.distance = 0
     this.plot = -1
-    this.finishedPlot = -1
+    this.finishedPlots.clear()
     this.ordered = false
     this.route.team = []
+    this.route.plot = -1
+    this.route.regroup = false
     this.route.dirty = true
     this.route.plan = null
     this.route.follower = null

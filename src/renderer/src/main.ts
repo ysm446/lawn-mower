@@ -30,7 +30,7 @@ import { PlotOverlay } from './render/plotOverlay'
 import { ZoneOverlay } from './render/zoneOverlay'
 import { ev100, ev100FromLuminance, shutterTimeForEv100 } from './camera/exposure'
 import { CoverageGrid } from './sim/coverage'
-import { planCoverage, type MowPattern } from './sim/coveragePlan'
+import { planCoverage, type CoveragePlan, type MowPattern } from './sim/coveragePlan'
 import { DEFAULT_FOLLOWER, PathFollower } from './sim/pathFollower'
 import { GrassField } from './sim/grassField'
 import { Profiler } from './profiler'
@@ -326,7 +326,7 @@ function updatePlots(): void {
   // 区画が変わったので、受け持つ区画は決め直す(自動運転のとき、空いている区画を引き受ける)
   for (const unit of mowers) {
     unit.plot = -1
-    unit.finishedPlot = -1
+    unit.finishedPlots.clear()
     unit.ordered = false
   }
   plotOverlay.update(result)
@@ -364,7 +364,7 @@ function assignPlot(unit: MowerUnit): void {
   unit.ordered = false
   if (plotting.teamwork) {
     // 分担して刈るときは、今の区画を続けるか、ほかの機体が刈っている区画に加わる(自分の分を終えた区画には戻らない)
-    const open = (id: number): boolean => id >= 0 && !plotting.done.has(id) && id !== unit.finishedPlot
+    const open = (id: number): boolean => id >= 0 && !plotting.done.has(id) && !unit.finishedPlots.has(id)
     if (open(unit.plot)) return
     const joined = teamPlots(unit).find(open)
     if (joined !== undefined) {
@@ -373,7 +373,7 @@ function assignPlot(unit: MowerUnit): void {
     }
   }
   const free = (id: number): boolean =>
-    id >= 0 && !plotting.done.has(id) && !plotTaken(id, unit) && id !== unit.finishedPlot
+    id >= 0 && !plotting.done.has(id) && !plotTaken(id, unit) && !unit.finishedPlots.has(id)
   if (free(unit.plot)) return
   const here = plotAt(unit.state.x, unit.state.z)
   if (free(here)) {
@@ -400,7 +400,7 @@ function assignPlot(unit: MowerUnit): void {
     let fewest = Infinity
     bestDistance = Infinity
     for (const plot of result.plots) {
-      if (plotting.done.has(plot.id) || plot.id === unit.finishedPlot) continue
+      if (plotting.done.has(plot.id) || unit.finishedPlots.has(plot.id)) continue
       const count = mowers.filter((m) => m !== unit && m.autoDrive && m.plot === plot.id).length
       const d = Math.hypot(
         terrain.origin + plot.centerX * cell - unit.state.x,
@@ -439,22 +439,20 @@ function teamOf(unit: MowerUnit): MowerUnit[] {
   const nx = Math.cos(angle)
   const nz = -Math.sin(angle)
   return mowers
-    .filter((m) => m === unit || (m.autoDrive && m.plot === unit.plot && m.finishedPlot !== unit.plot))
+    .filter((m) => m === unit || (m.autoDrive && m.plot === unit.plot && !m.finishedPlots.has(unit.plot)))
     .sort((a, b) => a.state.x * nx + a.state.z * nz - (b.state.x * nx + b.state.z * nz))
 }
 
 /**
  * 分担している組に新しい機体が加わったら、組の全員の経路を作り直す(残っている列を、新しい組で分け直す)。
- * 機体が抜けたときは作り直さない(残りの機体は、自分の分をそのまま刈る)。毎フレーム呼ぶ
+ * 機体が抜けたときは作り直さない(残りの機体は、自分の分をそのまま刈る)。毎フレーム呼ぶ。
+ * 走っている経路は捨てない(加わった機体に分け前がなければ、組はそのままになり、続きを刈る)
  */
 function checkTeams(): void {
   for (const unit of mowers) {
-    if (!unit.autoDrive || !unit.route.plan || unit.route.dirty) continue
+    if (!unit.autoDrive || !unit.route.plan || unit.route.dirty || unit.route.regroup) continue
     const team = teamOf(unit).map((m) => m.index)
-    if (team.some((i) => !unit.route.team.includes(i))) {
-      unit.route.dirty = true
-      unit.route.follower = null
-    }
+    if (team.some((i) => !unit.route.team.includes(i))) unit.route.regroup = true
   }
 }
 
@@ -501,7 +499,7 @@ function orderPlot(units: MowerUnit[], plot: number): void {
   plotting.done.delete(plot)
   for (const unit of units) {
     unit.plot = plot
-    unit.finishedPlot = -1
+    unit.finishedPlots.delete(plot)
     unit.ordered = true
     unit.autoDrive = true
     unit.route.dirty = true
@@ -518,7 +516,7 @@ function finishPlot(unit: MowerUnit): void {
     // 分担しているときは、組のほかの機体がまだ刈っていれば、区画はまだ刈り終えていない。自分は次の区画へ移る
     const others = teamOf(unit).filter((m) => m !== unit)
     if (others.length > 0) {
-      unit.finishedPlot = unit.plot
+      unit.finishedPlots.add(unit.plot)
       unit.plot = -1
     } else {
       plotting.done.add(unit.plot)
@@ -716,24 +714,43 @@ const formatKm = (m: number): string => `${(m / 1000).toFixed(2)} km`
 function updateRoute(unit: MowerUnit): void {
   if (zoning.dirty || !zoning.result || plotting.dirty || !plotting.result) updatePlots()
   assignPlot(unit)
+  const plot = unit.plot
   const team = teamOf(unit)
   const ids = team.map((m) => m.index)
-  for (const member of team) {
-    if (member !== unit && !member.route.dirty && ids.every((i) => member.route.team.includes(i))) continue
-    planRoute(member, team)
+  const members = team.filter(
+    (m) => m === unit || m.route.dirty || m.route.regroup || !ids.every((i) => m.route.team.includes(i))
+  )
+  const plans = members.map((m) => makePlan(m, team))
+  // 残りの列と周が組の台数より少ないと、分け前のない機体が出る。その機体はすぐに刈り終えて、
+  // 次の区画へ加わってはまた分け前がない、を繰り返す(経路を毎フレーム作り直して重くなり、旋回ばかりする)。
+  // そうなるときは、あとから加わった機体(指示されたものは除く)を加えず、ほかの区画を探させる
+  if (team.length > 1 && plans.some((p) => p.cutLength === 0)) {
+    const working = (m: MowerUnit): boolean =>
+      m.route.plan !== null && m.route.plot === plot && !m.route.dirty && m.route.follower !== null
+    const joiners = team.filter((m) => !m.ordered && !working(m))
+    if (joiners.length > 0 && joiners.length < team.length) {
+      for (const m of joiners) {
+        m.finishedPlots.add(plot)
+        m.plot = -1
+        m.route.dirty = true
+      }
+      // 残った組は、今の経路のまま続ける
+      const rest = team.filter((m) => !joiners.includes(m)).map((m) => m.index)
+      for (const m of team) {
+        if (!joiners.includes(m) && rest.every((i) => m.route.team.includes(i))) m.route.regroup = false
+      }
+      return
+    }
   }
+  members.forEach((m, k) => planRoute(m, team, plans[k]))
 }
 
-/** 組(team。分担しないときはその機体だけ)の中での受け持ちで、機体の経路を作る */
-function planRoute(unit: MowerUnit, team: MowerUnit[]): void {
-  const route = unit.route
-  route.dirty = false
-  route.team = team.map((m) => m.index)
+/** 組(team。分担しないときはその機体だけ)の中での受け持ちで、機体の経路を計算する(機体には反映しない) */
+function makePlan(unit: MowerUnit, team: MowerUnit[]): CoveragePlan {
   const plots = plotting.result as PlotResult
-  const cell = terrain.options.cell
   const mask = new Uint8Array(plots.labels.length)
   for (let i = 0; i < mask.length; i++) mask[i] = plots.labels[i] === unit.plot ? 1 : 0
-  const plan = planCoverage(
+  return planCoverage(
     {
       samples: terrain.samples,
       cell: terrain.options.cell,
@@ -757,6 +774,17 @@ function planRoute(unit: MowerUnit, team: MowerUnit[]): void {
     unit.state.z,
     unit.state.heading
   )
+}
+
+/** 計算した経路(plan)を、組(team)の中での機体の経路にする */
+function planRoute(unit: MowerUnit, team: MowerUnit[], plan: CoveragePlan): void {
+  const route = unit.route
+  route.dirty = false
+  route.regroup = false
+  route.team = team.map((m) => m.index)
+  route.plot = unit.plot
+  const plots = plotting.result as PlotResult
+  const cell = terrain.options.cell
   route.plan = plan
   route.follower = new PathFollower(plan.path, params)
   pathLineOf(unit).update(plan.path)
@@ -766,7 +794,7 @@ function planRoute(unit: MowerUnit, team: MowerUnit[]): void {
     plan.cutLength / (params.maxSpeed * 0.85) +
     plan.transitLength / (params.maxSpeed * DEFAULT_FOLLOWER.transitThrottle * 0.5)
   let cells = 0
-  for (let i = 0; i < mask.length; i++) cells += mask[i]
+  if (unit.plot >= 0) for (let i = 0; i < plots.labels.length; i++) if (plots.labels[i] === unit.plot) cells++
   route.text = {
     plot: `${unit.plot + 1} / ${plots.plots.length}(済み ${plotting.done.size}${team.length > 1 ? `、${team.length} 台で分担` : ''})`,
     area: `${((cells * cell * cell) / 10000).toFixed(2)} ha`,
@@ -1301,7 +1329,7 @@ syncs.push(
       // 受け持ちを決め直す(走っている経路は、今いる所から作り直す)
       for (const unit of mowers) {
         unit.plot = -1
-        unit.finishedPlot = -1
+        unit.finishedPlots.clear()
         unit.ordered = false
       }
       markRoutesDirty(true)
@@ -2548,7 +2576,9 @@ function frame(now: number): void {
   if (zoning.dirty) updateZoning()
   // 経路は、自動運転の機体と、区画と経路を表示しているときの乗っている機体の分を作る。重いので 1 フレームに 1 台まで
   checkTeams()
-  const needsRoute = mowers.find((m) => m.route.dirty && (m.autoDrive || (route.show && (!rider || m === rider))))
+  const needsRoute = mowers.find(
+    (m) => (m.route.dirty || m.route.regroup) && (m.autoDrive || (route.show && (!rider || m === rider)))
+  )
   if (needsRoute) updateRoute(needsRoute)
   else if (plotting.dirty && route.show) updatePlots()
 
