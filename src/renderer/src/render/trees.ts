@@ -3,6 +3,7 @@
 // 幹から枝が分かれ、枝のまわりに「小枝 1 本ぶんの葉をまとめた板」が付いている。板には葉の絵を貼る。
 // 葉と枝は風で揺れる。カメラから遠い木は、モデルを周りから撮った絵を板に貼って描く(インポスター、treeImpostor.ts)。
 // どちらで描くかは、カメラが動くたびに木ごとに決め直す。
+// 毎フレーム、画面に写る木と、画面に影を落としうる木を選び、それぞれ画面用と影の地図用のメッシュに入れる(Trees.cull)。
 
 import {
   BufferAttribute,
@@ -10,6 +11,7 @@ import {
   ConeGeometry,
   CylinderGeometry,
   DoubleSide,
+  Frustum,
   Group,
   IcosahedronGeometry,
   InstancedBufferAttribute,
@@ -22,6 +24,7 @@ import {
   RGBADepthPacking,
   Vector3,
   type BufferGeometry,
+  type Camera,
   type Material,
   type Texture,
   type WebGLRenderer
@@ -32,6 +35,7 @@ import treesUrl from '../assets/models/trees.glb?url'
 import { gradientNoise, type Terrain } from '../sim/terrain'
 import type { Tree, TreeKind } from '../sim/trees'
 import { broadleafTexture, needleTexture, type LeafTextures } from './leafTexture'
+import { SHADOW_ONLY_LAYER } from './lighting'
 import { buildImpostorAtlas, createImpostorMesh } from './treeImpostor'
 
 /** カメラからこの距離(水平、m)より近い木は、細かいモデル(LOD0)で描く(初期値。設定で変える) */
@@ -349,6 +353,21 @@ interface TreeMeshes {
   leaves: InstancedMesh
 }
 
+/** 描き方ごとのメッシュ */
+interface LodMeshes {
+  /** 細かいモデル。カメラの近くの木と、1 本立ちの木 */
+  detail: TreeMeshes
+  /** 簡略モデル。trees.glb に無ければ null */
+  simple: TreeMeshes | null
+  /** 遠くの木のインポスター */
+  impostor: InstancedMesh
+}
+
+/** 描き方の番号(LodGroup.lod) */
+const LOD_DETAIL = 0
+const LOD_SIMPLE = 1
+const LOD_IMPOSTOR = 2
+
 /** 1 つのモデルの木の置き方と、どの描き方で描くか */
 interface LodGroup {
   trees: Tree[]
@@ -356,15 +375,24 @@ interface LodGroup {
   matrices: Float32Array
   /** 木ごとの葉の色(3 個ずつ) */
   tints: Float32Array
-  /** 細かいモデル。カメラの近くの木と、1 本立ちの木 */
-  detail: TreeMeshes
+  /** 木ごとの、枝葉を囲む球(中心 xyz と半径の 4 個ずつ。風の揺れの分を足してある)。視錐台で選ぶのに使う */
+  spheres: Float32Array
   /**
-   * 簡略モデル。影を落とす分(影を描く距離の内側)と、落とさない分に分ける。
-   * 影の地図は段ごとにメッシュ全体を描き直すので、遠くの木まで影に入れると重い。trees.glb に無ければ null
+   * 木ごとの、てっぺんから地形のいちばん低い所までの高さ(m)。影の長さの見積もりに使う。
+   * 起伏があると、尾根の木の影は下りの斜面に長く伸びるので、木の高さだけでは足りない
    */
-  simple: { shadowed: TreeMeshes; plain: TreeMeshes } | null
-  /** 遠くの木のインポスター */
-  impostor: InstancedMesh
+  drops: Float32Array
+  /** 木ごとの描き方(LOD_*)。カメラが動いたら assignLod で決め直す */
+  lod: Uint8Array
+  /** 木ごとに、影を描く距離の内側か(簡略モデルは、この内側の木だけが影を落とす) */
+  shadowed: Uint8Array
+  /** 画面に描く分。影は落とさない。カメラの視錐台に入る木だけを入れる */
+  view: LodMeshes
+  /**
+   * 影を落とす分(影の地図にだけ描く。SHADOW_ONLY_LAYER)。影が視錐台にかかりうる木だけを入れる。
+   * 影の地図は段ごとにメッシュ全体を描き直すので、画面に写らない所の木まで入れると重い
+   */
+  casters: LodMeshes
 }
 
 export class Trees {
@@ -394,9 +422,17 @@ export class Trees {
   private impostorDistance = IMPOSTOR_DISTANCE
   /** 影を描く距離(m)。簡略モデルのうち、この内側の木だけが影を落とす */
   private shadowDistance = 220
+  /** 視錐台で木を選ぶか(計測で切って比べる用)。切ると、すべての木を画面と影の地図に描く */
+  private culling = true
+  /** 最後に木を選んだときのカメラと太陽(変わらなければ選び直さない) */
+  private readonly cullKey = new Float64Array(36)
+  private cullDirty = true
+  private readonly frustum = new Frustum()
+  private readonly viewProjection = new Matrix4()
 
   constructor(trees: Tree[], terrain: Terrain, renderer: WebGLRenderer) {
     if (trees.length === 0) return
+    const floor = groundFloor(trees, terrain)
     const matrix = new Matrix4()
     const position = new Vector3()
     const scale = new Vector3()
@@ -410,10 +446,12 @@ export class Trees {
         ? color.setRGB(0.026 + 0.018 * t, 0.07 + 0.03 * t, 0.034 + 0.012 * t)
         : color.setRGB(0.035 + 0.035 * t, 0.085 + 0.05 * t, 0.018 + 0.012 * (1 - t))
     }
-    const add = (mesh: InstancedMesh, shadows: boolean): void => {
-      mesh.castShadow = shadows
-      mesh.receiveShadow = true
-      // 範囲が広いので、まとめて視錐台で切り捨てられないようにする
+    /** メッシュを加える。caster なら影の地図にだけ描く(SHADOW_ONLY_LAYER)。画面に描く分は影を落とさない */
+    const add = (mesh: InstancedMesh, caster: boolean): void => {
+      mesh.castShadow = caster
+      mesh.receiveShadow = !caster
+      if (caster) mesh.layers.set(SHADOW_ONLY_LAYER)
+      // 範囲が広いので、メッシュ全体では視錐台で切り捨てない(木ごとに選ぶ。Trees.cull)
       mesh.frustumCulled = false
       this.group.add(mesh)
     }
@@ -446,8 +484,13 @@ export class Trees {
           crowns.setMatrixAt(i, matrix.compose(position, rotation, scale))
           crowns.setColorAt(i, leafColor(tree))
         })
-        add(trunks, true)
-        add(crowns, true)
+        // 木ごとには選ばない。画面にも影の地図にも、すべての木を描く
+        for (const mesh of [trunks, crowns]) {
+          mesh.castShadow = true
+          mesh.receiveShadow = true
+          mesh.frustumCulled = false
+          this.group.add(mesh)
+        }
       }
     }
 
@@ -603,46 +646,73 @@ export class Trees {
           if (members.length === 0) return
           const matrices = new Float32Array(members.length * 16)
           const tints = new Float32Array(members.length * 3)
+          const spheres = new Float32Array(members.length * 4)
+          const drops = new Float32Array(members.length)
+          // モデルの枝葉を囲む球(モデルの座標)
+          v.bark.computeBoundingSphere()
+          v.leaves.computeBoundingSphere()
+          const bound = v.leaves.boundingSphere!.clone().union(v.bark.boundingSphere!)
+          const center = new Vector3()
           members.forEach((tree, i) => {
             position.set(tree.x, terrain.heightAt(tree.x, tree.z), tree.z)
             rotation.setFromAxisAngle(up, tree.tone * 37)
             const size = tree.height / model.height
             scale.set(size, size, size)
             matrix.compose(position, rotation, scale).toArray(matrices, i * 16)
+            center.copy(bound.center).applyMatrix4(matrix).toArray(spheres, i * 4)
+            // 風でしなる分だけ大きめに取る
+            spheres[i * 4 + 3] = bound.radius * size * 1.1 + 0.5
+            drops[i] = position.y + tree.height - floor
             // 葉の絵が明るい灰緑なので、その分だけ色を濃く掛ける
             leafColor(tree).multiplyScalar(2.2).toArray(tints, i * 3)
           })
-          /** 幹と葉のメッシュを作る(中身は分け直すたびに書き換える) */
-          const makeMeshes = (bark: BufferGeometry, leaves: BufferGeometry, shadows: boolean): TreeMeshes => {
+          /**
+           * 幹と葉のメッシュを作る(中身は選び直すたびに書き換える)。幹と葉は同じ行列の入れ物を使う。
+           * caster なら影の地図にだけ描く(影の地図では材質の代わりに customDepthMaterial を使う)
+           */
+          const makeMeshes = (bark: BufferGeometry, leaves: BufferGeometry, caster: boolean): TreeMeshes => {
             const barkMesh = new InstancedMesh(bark, v.barkMaterial, members.length)
             const leafMesh = new InstancedMesh(leaves, v.leafMaterial, members.length)
+            leafMesh.instanceMatrix = barkMesh.instanceMatrix
             barkMesh.customDepthMaterial = v.barkShadow
             leafMesh.customDepthMaterial = v.leafShadow
             // 色の入れ物を作っておく
-            leafMesh.setColorAt(0, color.setRGB(1, 1, 1))
+            if (!caster) leafMesh.setColorAt(0, color.setRGB(1, 1, 1))
             barkMesh.count = 0
             leafMesh.count = 0
-            add(barkMesh, shadows)
-            add(leafMesh, shadows)
+            add(barkMesh, caster)
+            add(leafMesh, caster)
             return { bark: barkMesh, leaves: leafMesh }
           }
-          const detail = makeMeshes(v.bark, v.leaves, true)
-          const simple = v.simple
-            ? {
-                shadowed: makeMeshes(v.simple.bark, v.simple.leaves, true),
-                plain: makeMeshes(v.simple.bark, v.simple.leaves, false)
-              }
-            : null
-          const impostor = createImpostorMesh(atlas, row, barkColor, members.length, {
-            uniforms: {
-              uLeafGlint: this.leafGlint,
-              uLeafGlintAverage: this.leafGlintAverage
-            },
-            scale: v.kind === 'conifer' ? NEEDLE_GLINT_SCALE : 1,
-            tint: LEAF_GLINT_TINT
+          const makeImpostor = (): InstancedMesh =>
+            createImpostorMesh(atlas, row, barkColor, members.length, {
+              uniforms: {
+                uLeafGlint: this.leafGlint,
+                uLeafGlintAverage: this.leafGlintAverage
+              },
+              scale: v.kind === 'conifer' ? NEEDLE_GLINT_SCALE : 1,
+              tint: LEAF_GLINT_TINT
+            })
+          const makeLods = (caster: boolean): LodMeshes => {
+            const impostor = makeImpostor()
+            add(impostor, caster)
+            return {
+              detail: makeMeshes(v.bark, v.leaves, caster),
+              simple: v.simple ? makeMeshes(v.simple.bark, v.simple.leaves, caster) : null,
+              impostor
+            }
+          }
+          this.lodGroups.push({
+            trees: members,
+            matrices,
+            tints,
+            spheres,
+            drops,
+            lod: new Uint8Array(members.length),
+            shadowed: new Uint8Array(members.length),
+            view: makeLods(false),
+            casters: makeLods(true)
           })
-          add(impostor, true)
-          this.lodGroups.push({ trees: members, matrices, tints, detail, simple, impostor })
         })
         this.lodAt = null
       },
@@ -735,57 +805,185 @@ export class Trees {
     this.lodAt = null
   }
 
-  /** 木ごとに、カメラからの距離で描き方を決めて、それぞれのメッシュに入れる */
+  /** 視錐台で木を選ぶか(計測で比べる用)。切ると、すべての木を画面と影の地図に描く(入れる前と同じ) */
+  setCulling(on: boolean): void {
+    this.culling = on
+    this.cullDirty = true
+  }
+
+  /** 木ごとに、カメラからの距離で描き方を決める。メッシュに入れるのは cull */
   private assignLod(group: LodGroup, cx: number, cz: number): void {
-    const { trees, matrices, tints, detail, simple, impostor } = group
-    const tintAttribute = impostor.geometry.getAttribute('aTint') as InstancedBufferAttribute
-    const farMatrices = impostor.instanceMatrix.array as Float32Array
-    const farTints = tintAttribute.array as Float32Array
-    const slots = [detail, ...(simple ? [simple.shadowed, simple.plain] : [])].map((meshes) => ({
-      meshes,
-      barkMatrices: meshes.bark.instanceMatrix.array as Float32Array,
-      leafMatrices: meshes.leaves.instanceMatrix.array as Float32Array,
-      leafColors: meshes.leaves.instanceColor?.array as Float32Array | undefined,
-      count: 0
-    }))
-    const detailReach = simple ? this.detailDistance : FALLBACK_DISTANCE
-    const simpleReach = simple ? this.impostorDistance : FALLBACK_DISTANCE
-    let far = 0
+    const { trees, lod, shadowed, view } = group
+    const detailReach = view.simple ? this.detailDistance : FALLBACK_DISTANCE
+    const simpleReach = view.simple ? this.impostorDistance : FALLBACK_DISTANCE
     for (let i = 0; i < trees.length; i++) {
       const tree = trees[i]
-      const m = matrices.subarray(i * 16, i * 16 + 16)
-      const tint = tints.subarray(i * 3, i * 3 + 3)
       const distance = Math.hypot(tree.x - cx, tree.z - cz)
-      // 0: 細かいモデル、1: 簡略モデル(影あり)、2: 簡略モデル(影なし)、-1: インポスター
-      const slot =
-        tree.lone || distance < detailReach
-          ? 0
-          : distance < simpleReach
-            ? distance < this.shadowDistance
-              ? 1
-              : 2
-            : -1
-      if (slot < 0) {
-        farMatrices.set(m, far * 16)
-        farTints.set(tint, far * 3)
-        far++
-        continue
+      lod[i] =
+        tree.lone || distance < detailReach ? LOD_DETAIL : distance < simpleReach ? LOD_SIMPLE : LOD_IMPOSTOR
+      shadowed[i] = distance < this.shadowDistance ? 1 : 0
+    }
+    this.cullDirty = true
+  }
+
+  /**
+   * 毎フレーム、描く直前(太陽の向きを setSun で渡したあと)に呼ぶ。画面に描く木と、影を落とす木を選んでメッシュに入れる。
+   * 画面に描くのは、枝葉を囲む球がカメラの視錐台にかかる木。
+   * 影を落とすのは、その球を太陽と反対の向きへ影の長さだけ伸ばした形が視錐台にかかり、影を描く距離に届く木
+   * (画面の外の木の影が画面に落ちることがあるため)。カメラと太陽が動かなければ選び直さない
+   */
+  cull(camera: Camera): void {
+    if (this.lodGroups.length === 0) return
+    camera.updateMatrixWorld()
+    const sun = this.sunDirection.value
+    const key = this.cullKey
+    const world = camera.matrixWorld.elements
+    const projection = camera.projectionMatrix.elements
+    let changed = this.cullDirty
+    for (let i = 0; i < 16; i++) {
+      if (key[i] !== world[i] || key[16 + i] !== projection[i]) changed = true
+      key[i] = world[i]
+      key[16 + i] = projection[i]
+    }
+    if (key[32] !== sun.x || key[33] !== sun.y || key[34] !== sun.z) changed = true
+    key[32] = sun.x
+    key[33] = sun.y
+    key[34] = sun.z
+    if (!changed) return
+    this.cullDirty = false
+
+    this.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+    this.frustum.setFromProjectionMatrix(this.viewProjection)
+    const planes = this.frustum.planes
+    // 影を伸ばす向き(太陽と反対)と、伸ばした向きの各面への近づき方
+    const sunLength = Math.hypot(sun.x, sun.y, sun.z) || 1
+    const sx = -sun.x / sunLength
+    const sy = -sun.y / sunLength
+    const sz = -sun.z / sunLength
+    const along = planes.map((p) => p.normal.x * sx + p.normal.y * sy + p.normal.z * sz)
+    // 高さ 1 m あたりの影の長さ(太陽が低いほど長い)
+    const shadowPerHeight = 1 / Math.max(sun.y / sunLength, SHADOW_MIN_SUN)
+    // 影を描く距離はカメラの奥行きで測るので、斜めの方向の分だけ広めに取る
+    const shadowReach = this.shadowDistance * 1.5
+    const cx = world[12]
+    const cy = world[13]
+    const cz = world[14]
+    const culling = this.culling
+
+    for (const group of this.lodGroups) {
+      const { trees, matrices, tints, spheres, drops, lod, shadowed, view, casters } = group
+      const viewFill = fillers(view, true)
+      const casterFill = fillers(casters, false)
+      for (let i = 0; i < trees.length; i++) {
+        const level = lod[i]
+        const casts = level !== LOD_SIMPLE || shadowed[i] === 1
+        let inView = true
+        let inShadow = casts
+        if (culling) {
+          const x = spheres[i * 4]
+          const y = spheres[i * 4 + 1]
+          const z = spheres[i * 4 + 2]
+          const r = spheres[i * 4 + 3]
+          // 影を描く距離より先まで伸ばしても、影の地図の外になる
+          const length = Math.min(drops[i] * shadowPerHeight, shadowReach)
+          if (inShadow && Math.hypot(x - cx, y - cy, z - cz) > shadowReach + length + r) inShadow = false
+          for (let p = 0; p < 6 && (inView || inShadow); p++) {
+            const plane = planes[p]
+            const d = plane.normal.x * x + plane.normal.y * y + plane.normal.z * z + plane.constant
+            if (d < -r) inView = false
+            if (d + Math.max(0, along[p] * length) < -r) inShadow = false
+          }
+        }
+        if (inView) viewFill[level]?.push(matrices, tints, i)
+        if (inShadow) casterFill[level]?.push(matrices, tints, i)
       }
-      const s = slots[slot]
-      s.barkMatrices.set(m, s.count * 16)
-      s.leafMatrices.set(m, s.count * 16)
-      s.leafColors?.set(tint, s.count * 3)
-      s.count++
+      for (const f of viewFill) f?.finish()
+      for (const f of casterFill) f?.finish()
     }
-    for (const s of slots) {
-      s.meshes.bark.count = s.count
-      s.meshes.leaves.count = s.count
-      s.meshes.bark.instanceMatrix.needsUpdate = true
-      s.meshes.leaves.instanceMatrix.needsUpdate = true
-      if (s.meshes.leaves.instanceColor) s.meshes.leaves.instanceColor.needsUpdate = true
+  }
+}
+
+/** 影を落とす木を選ぶとき、太陽の高さ(sin)をこれより小さくしない(影の長さが果てしなくならないように) */
+const SHADOW_MIN_SUN = 0.08
+/** 地形のいちばん低い所を探すとき、木の並ぶ範囲から外へ広げる幅(m)と、調べる間隔(m) */
+const FLOOR_MARGIN = 300
+const FLOOR_STEP = 8
+
+/** 木の並ぶ範囲(と、その外の影が届きうる所)で、地形のいちばん低い高さ */
+function groundFloor(trees: Tree[], terrain: Terrain): number {
+  let minX = Infinity
+  let maxX = -Infinity
+  let minZ = Infinity
+  let maxZ = -Infinity
+  for (const t of trees) {
+    minX = Math.min(minX, t.x)
+    maxX = Math.max(maxX, t.x)
+    minZ = Math.min(minZ, t.z)
+    maxZ = Math.max(maxZ, t.z)
+  }
+  let floor = Infinity
+  for (let z = minZ - FLOOR_MARGIN; z <= maxZ + FLOOR_MARGIN; z += FLOOR_STEP) {
+    for (let x = minX - FLOOR_MARGIN; x <= maxX + FLOOR_MARGIN; x += FLOOR_STEP) {
+      floor = Math.min(floor, terrain.heightAt(x, z))
     }
-    impostor.count = far
-    impostor.instanceMatrix.needsUpdate = true
-    tintAttribute.needsUpdate = true
+  }
+  // 調べた点の間の窪みの分、少し下げる
+  return floor - 2
+}
+
+/** 選んだ木の行列と色を、メッシュの入れ物に詰めていく */
+interface Filler {
+  push(matrices: Float32Array, tints: Float32Array, index: number): void
+  finish(): void
+}
+
+/** 描き方ごとの Filler(LOD_* の順)。簡略モデルが無ければ null */
+function fillers(meshes: LodMeshes, withTint: boolean): (Filler | null)[] {
+  const pair = (m: TreeMeshes | null): Filler | null =>
+    m && filler([m.bark, m.leaves], m.bark.instanceMatrix, withTint ? m.leaves.instanceColor : null)
+  const impostor = meshes.impostor
+  return [
+    pair(meshes.detail),
+    pair(meshes.simple),
+    filler(
+      [impostor],
+      impostor.instanceMatrix,
+      withTint ? (impostor.geometry.getAttribute('aTint') as InstancedBufferAttribute) : null
+    )
+  ]
+}
+
+function filler(
+  meshes: InstancedMesh[],
+  matrixAttribute: InstancedBufferAttribute,
+  tintAttribute: InstancedBufferAttribute | null
+): Filler {
+  const out = matrixAttribute.array as Float32Array
+  const outTints = tintAttribute?.array as Float32Array | undefined
+  let count = 0
+  return {
+    push(matrices, tints, index) {
+      out.set(matrices.subarray(index * 16, index * 16 + 16), count * 16)
+      outTints?.set(tints.subarray(index * 3, index * 3 + 3), count * 3)
+      count++
+    },
+    finish() {
+      for (const mesh of meshes) {
+        mesh.count = count
+        // 空のメッシュは描かない(描く命令を減らす)
+        mesh.visible = count > 0
+      }
+      if (count === 0) return
+      // 使った所だけを送る(幹と葉で同じ入れ物を使うので 1 度でよい)
+      for (const [attribute, size] of [
+        [matrixAttribute, 16],
+        [tintAttribute, 3]
+      ] as const) {
+        if (!attribute) continue
+        attribute.clearUpdateRanges()
+        attribute.addUpdateRange(0, count * size)
+        attribute.needsUpdate = true
+      }
+    }
   }
 }

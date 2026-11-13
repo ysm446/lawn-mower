@@ -18,9 +18,15 @@ import {
 //   LM_QUERY            レンダラーに渡すクエリ文字列(例: "auto=1&timescale=16&cam=orbit")
 //   LM_SCREENSHOT       指定すると、そのパスに画面を保存して終了する
 //   LM_SCREENSHOT_DELAY 保存までの待ち時間(ミリ秒)。既定は 5000
+//   LM_NO_VSYNC         1 にすると、画面の更新(垂直同期)に合わせずに描く。計測モード(profile=1)で fps を比べるとき用
 const query = process.env.LM_QUERY ?? ''
 const screenshotPath = process.env.LM_SCREENSHOT
 const screenshotDelay = Number(process.env.LM_SCREENSHOT_DELAY ?? 5000)
+
+if (process.env.LM_NO_VSYNC === '1') {
+  app.commandLine.appendSwitch('disable-gpu-vsync')
+  app.commandLine.appendSwitch('disable-frame-rate-limit')
+}
 
 // 動作確認で画面を撮るとき(LM_SCREENSHOT)は、保存先(設定やパネルの値を入れる localStorage など)を
 // ふだんのものから切り離し、一時フォルダの起動ごとに新しい場所を使う。

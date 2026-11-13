@@ -176,6 +176,8 @@ const blocked = map.trees
   : undefined
 const treeModels = new Trees(treeList, terrain, renderer)
 scene.add(treeModels.group)
+// 動作確認用: cull=0 で、樹木を視錐台で選ばずにすべて描く(選ぶ場合と見た目を比べる)
+if (query.get('cull') === '0') treeModels.setCulling(false)
 const windSettings = { strength: 1 }
 // 時間の表現。タイムラプス(コマ落ち)と、時刻で動く太陽
 const queryHour = Number(query.get('time'))
@@ -2503,17 +2505,29 @@ function spawnClipping(x: number, z: number, vx: number, vy: number, vz: number)
 }
 
 // 動作確認用: ?profile=1 で、どこが重いかを測ってログに出し、終わったら閉じる(profiler.ts)
-const profiler = query.get('profile') === '1' ? createProfiler() : null
-function createProfiler(): Profiler {
+// ?profile=cull では、樹木を視錐台で選ぶ場合と選ばない場合を交互に 3 回ずつ測る(ばらつきを見るため)
+const profileMode = query.get('profile')
+const profiler = profileMode === '1' || profileMode === 'cull' ? createProfiler(profileMode === 'cull') : null
+function createProfiler(cullOnly: boolean): Profiler {
   // 測る間は、描画の回数と解像度の上限を外す(保存はしない)
   settings.fpsLimit = 0
   settings.pixelRatio = DEFAULT_SETTINGS.pixelRatio
   resize()
+  const cullVariants = [1, 2, 3].flatMap((n) => [
+    { name: `木を選ぶ ${n}`, apply: () => () => {} },
+    {
+      name: `木を選ばない ${n}`,
+      apply: () => {
+        treeModels.setCulling(false)
+        return () => treeModels.setCulling(true)
+      }
+    }
+  ])
   const p = new Profiler(renderer.getContext() as WebGL2RenderingContext, {
     warmup: 4,
     settle: 1.5,
     measure: 4,
-    variants: [
+    variants: cullOnly ? cullVariants : [
       { name: '基準', apply: () => () => {} },
       {
         name: '影の更新を止める',
@@ -2724,6 +2738,7 @@ function frame(now: number): void {
   profiler?.begin('lighting')
   lighting.update(renderer, exposure, rig.camera.position)
   treeModels.setSun(lighting.sunDirection, lighting.sunLight)
+  treeModels.cull(rig.camera)
   profiler?.begin('update')
   // ギズモは、見ている所(機体のあたり)を中心に、カメラからの距離に比例した大きさで出す
   sunGizmo.update(
