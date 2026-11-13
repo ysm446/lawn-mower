@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import appIcon from '../../resources/icons/lawn-mower-overhead.png?asset'
 import {
@@ -20,6 +21,21 @@ import {
 const query = process.env.LM_QUERY ?? ''
 const screenshotPath = process.env.LM_SCREENSHOT
 const screenshotDelay = Number(process.env.LM_SCREENSHOT_DELAY ?? 5000)
+
+// 動作確認で画面を撮るとき(LM_SCREENSHOT)は、保存先(設定やパネルの値を入れる localStorage など)を
+// ふだんのものから切り離し、一時フォルダの起動ごとに新しい場所を使う。
+// ふだん使っているアプリと同時に起動しても、設定を読めなくなったり書き換えたりしないように、
+// また撮る画面が保存した設定に左右されず、いつも既定の状態から始まるようにするため。
+// 前の確認で作った場所は、ここで片付ける(使っている途中のものは消せないので、そのまま残る)
+if (screenshotPath) {
+  const root = join(tmpdir(), 'lawn-mower-check')
+  try {
+    for (const name of readdirSync(root)) rmSync(join(root, name), { recursive: true, force: true })
+  } catch {
+    // まだ無いか、使っている途中で消せないものがある
+  }
+  app.setPath('userData', join(root, `run-${process.pid}`))
+}
 
 // 保存するもの(スクリーンショット、録画)の置き場所。アプリのフォルダの data/(Git の管理に入れない)
 function dataDir(): string {

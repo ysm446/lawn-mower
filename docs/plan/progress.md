@@ -1,7 +1,7 @@
 # progress — 進捗と注意点
 
 作成日時: 2026-11-11 04:54
-更新日時: 2026-11-13 16:30
+更新日時: 2026-11-13 16:45
 
 ## 現在の状況
 
@@ -420,10 +420,12 @@ M0(土台)から M4(自動走行)までが完了。丘陵の地形を手動ま�
 - 芝刈り機のモデルの作り直し: `& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python tools\blender\build_mower.py`(`mower.glb` を上書きする。モデルを直すときはスクリプトを直して実行する)
 - 動作確認用の環境変数(`src/main/index.ts`):
   - `LM_QUERY`: 起動時の指定。例 `auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1&path=1&blades=0&zoom=0.5&map=meadow&log=1&settings=1&timelapse=1&time=17.5&clouds=0.5&orbit=3&sunel=14&sunaz=0&chase=0,-18&gizmo=1`
-  - `LM_SCREENSHOT`: 指定したパスに画面を保存して終了する。
+  - `LM_SCREENSHOT`: 指定したパスに画面を保存して終了する。このときは保存先(`userData`。設定やパネルの値の localStorage など)を、一時フォルダの `lawn-mower-check/run-<プロセス番号>` に切り離す。ふだんのアプリと同時に起動しても設定を壊さず、撮る画面はいつも既定の状態から始まる。前の確認で作った場所は、次に起動したときに片付ける。
   - `LM_SCREENSHOT_DELAY`: 保存までの待ち時間(ミリ秒)。
 
 ## 注意点
+
+- 設定とパネルの値は localStorage に入れているので、読み込み元ごとに別々になる。`npm run dev`(`http://localhost:ポート`)と `start.bat`・`npm run start`(`file://`)では設定を共有しない。dev はポートが空いていないと番号がずれ、そのたびに空の状態から始まる。また同じアプリを 2 つ同時に起動すると、後から起動した方は保存先を開けず、設定が既定値に見えることがある(Chromium の挙動。確かめてはいない)。
 
 - タイムラプス中のカメラは機体を遅れて追う。倍速が高いと、往復する機体の動きにカメラが追いつかず、機体が画面の外へ出ることがある(64 倍速で 20〜30 m ほど遅れる)。
 - 256 倍速では 1 コマの間に機体が 70 m ほど進む。往復刈りの 1 列が 1〜2 コマで終わるので、機体は飛び飛びに見える。
