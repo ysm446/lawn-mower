@@ -68,7 +68,7 @@ export const DEFAULT_LIGHTING: LightingSettings = {
   sunElevation: 28,
   sunAzimuth: 125,
   sunIlluminance: SOLAR_ILLUMINANCE,
-  haze: 3,
+  haze: 1,
   cloudCover: 0.35,
   skylightIntensity: 1
 }

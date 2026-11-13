@@ -55,10 +55,15 @@ export interface AppSettings {
   showNormals: boolean
   /** 動作確認用: 法線マップの傾きを何倍に強調して見せるか */
   normalGain: number
+  /**
+   * 既定値の版。既定値を変えたとき、保存してある値が古い既定値のままなら新しい既定値に置き換えるために使う
+   * (設定は全項目をまとめて保存するので、変えていない項目も古い既定値で残っている)。画面には出さない
+   */
+  defaultsVersion: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  fpsLimit: 0,
+  fpsLimit: 60,
   pixelRatio: 2,
   windowSize: 1080,
   dofSamples: 80,
@@ -67,8 +72,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   grassDistance: 20,
   grassStripe: 0.18,
   grassTilt: 0.2,
-  shadowDistance: 220,
-  shadowCascades: 3,
+  shadowDistance: 600,
+  shadowCascades: 4,
   shadowMapSize: 2048,
   treeDetailDistance: 60,
   treeImpostorDistance: 400,
@@ -79,11 +84,25 @@ export const DEFAULT_SETTINGS: AppSettings = {
   clippings: true,
   swayTimeScale: 1,
   showHint: true,
-  recordingFps: 30,
+  recordingFps: 60,
   recordingCursor: false,
   showNormals: false,
-  normalGain: 4
+  normalGain: 4,
+  defaultsVersion: 3
 }
+
+/**
+ * 既定値を変えた記録。保存してある版がこれより古く、値が以前の既定値のままなら、今の既定値に置き換える
+ * (自分で選んだ値は残す)
+ */
+const DEFAULT_CHANGES: { version: number; key: keyof AppSettings; previous: number | boolean }[] = [
+  // 版 2: 管制の視点などで遠くまで見渡すので、影を遠くまで落とす。近くの影が粗くならないよう段も増やす
+  { version: 2, key: 'shadowDistance', previous: 220 },
+  { version: 2, key: 'shadowCascades', previous: 3 },
+  // 版 3: 描画 FPS の上限と録画のコマ数を、どちらも 60 にそろえる
+  { version: 3, key: 'fpsLimit', previous: 0 },
+  { version: 3, key: 'recordingFps', previous: 30 }
+]
 
 const STORAGE_KEY = 'lawn-mower-settings'
 /** 保存はするが、次の起動では戻さない項目(動作確認用の表示) */
@@ -108,14 +127,22 @@ export function loadSettings(): AppSettings {
       saved[key] = legacy[panelKey]
       migrated = true
     }
+    const savedVersion = typeof saved.defaultsVersion === 'number' ? saved.defaultsVersion : 1
+    for (const change of DEFAULT_CHANGES) {
+      if (savedVersion < change.version && saved[change.key] === change.previous) {
+        delete saved[change.key]
+        migrated = true
+      }
+    }
+    delete saved.defaultsVersion
     for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
       if (TRANSIENT_KEYS.includes(key)) continue
       if (typeof saved[key] === typeof DEFAULT_SETTINGS[key]) {
         ;(settings as unknown as Record<string, unknown>)[key] = saved[key]
       }
     }
-    // パネルの保存は、次に保存するとき芝の項目が抜けるので、引き継いだらすぐ設定に書いておく
-    if (migrated) saveSettings(settings)
+    // 引き継いだ値と、置き換えた既定値は、すぐ保存しておく(パネルの保存は、次に保存するとき芝の項目が抜ける)
+    if (migrated || savedVersion < DEFAULT_SETTINGS.defaultsVersion) saveSettings(settings)
   } catch {
     // 読めないときは既定値のまま使う
   }

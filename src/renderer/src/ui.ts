@@ -51,11 +51,23 @@ function registerPanelValue(
   })
 }
 
+/**
+ * 既定値を変えた記録。保存してある版(`__defaultsVersion`)がこれより古く、値が以前の既定値のままなら、
+ * 戻さずに今の既定値を使う(パネルの値は全項目をまとめて保存するので、触っていない項目も古い既定値で残っている)。
+ * 鍵は「入れ物の id / ラベル」。既定値を変えたら、ここに足す
+ */
+const PANEL_DEFAULT_CHANGES: { version: number; key: string; previous: unknown }[] = [
+  // 版 2: 遠くがぼやけすぎるので、霞を薄くする(3 → 1)
+  { version: 2, key: 'light-fields/霞', previous: 3 }
+]
+const PANEL_DEFAULTS_VERSION = Math.max(1, ...PANEL_DEFAULT_CHANGES.map((change) => change.version))
+const VERSION_KEY = '__defaultsVersion'
+
 /** 右の列のパネルの値を保存する */
 export function savePanelValues(): void {
   window.clearTimeout(saveTimer)
   if (!persistEnabled) return
-  const values: Record<string, unknown> = {}
+  const values: Record<string, unknown> = { [VERSION_KEY]: PANEL_DEFAULTS_VERSION }
   for (const item of panelValues) values[item.key] = item.get()
   try {
     window.localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(values))
@@ -84,11 +96,17 @@ export function restorePanelValues(): void {
   } catch {
     saved = {}
   }
+  const savedVersion = typeof saved[VERSION_KEY] === 'number' ? (saved[VERSION_KEY] as number) : 1
+  for (const change of PANEL_DEFAULT_CHANGES) {
+    if (savedVersion < change.version && saved[change.key] === change.previous) delete saved[change.key]
+  }
   for (const item of panelValues) {
     const value = saved[item.key]
     if (value === undefined || typeof value !== typeof item.get() || !item.restore()) continue
     item.set(value)
   }
+  // 既定値を置き換えたときは、すぐ保存しておく(次の起動で、また古い値として扱わないように)
+  if (savedVersion < PANEL_DEFAULTS_VERSION) savePanelValues()
   // 太陽の向きのドラッグなど、パネルの外から変えた値も、閉じるときに保存する
   window.addEventListener('beforeunload', savePanelValues)
 }
