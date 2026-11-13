@@ -23,6 +23,7 @@ import { MowMap } from './render/mowMap'
 import { OVERLAY_PALETTE, overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
 import { PathLine } from './render/pathLine'
 import { Trees } from './render/trees'
+import { enhanceSelect } from './customSelect'
 import { DofPass, MeterPass } from './render/postfx'
 import { PlotOverlay } from './render/plotOverlay'
 import { ZoneOverlay } from './render/zoneOverlay'
@@ -58,6 +59,7 @@ import {
   addSlider,
   addSwitch,
   byId,
+  rememberPanelFolds,
   restorePanelValues,
   setupHelp,
   stopsSlider,
@@ -123,6 +125,19 @@ renderer.toneMapping = ACESFilmicToneMapping
 renderer.toneMappingExposure = 1
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = PCFShadowMap
+// 「性能」パネルの描画の数は、1 フレームの合計で数える(後処理の段や影の地図も含む)。
+// 既定では renderer.render のたびに数え直し、最後の段の分しか残らないので、フレームの頭で手で消す
+renderer.info.autoReset = false
+// three.js は頂点の数を数えないので、描くたびに渡される数(インデックスか頂点の数 × インスタンス数)を足す
+const drawStats = { vertices: 0 }
+{
+  const info = renderer.info as unknown as { update: (count: number, mode: number, instanceCount: number) => void }
+  const update = info.update.bind(info)
+  info.update = (count, mode, instanceCount) => {
+    drawStats.vertices += count * instanceCount
+    update(count, mode, instanceCount)
+  }
+}
 
 const scene = new Scene()
 const rig = new CameraRig(canvas)
@@ -805,7 +820,19 @@ const setCameraReadout = addReadout(byId('camera-readout'), {
   exposure: '露出',
   focus: 'ピント'
 })
-const fpsCounter = byId('fps-counter')
+const perfPanel = byId('perf-panel')
+const perfFps = byId('perf-fps')
+const setPerfReadout = addReadout(byId('perf-readout'), {
+  frame: 'フレーム間隔',
+  work: '処理時間(CPU)',
+  calls: 'ドローコール',
+  triangles: 'ポリゴン',
+  vertices: '頂点',
+  lines: '線・点',
+  geometries: 'ジオメトリ',
+  textures: 'テクスチャ',
+  programs: 'シェーダー'
+})
 
 const cameraFields = byId('camera-fields')
 const focalRange = Math.log(FOCAL_MAX / FOCAL_MIN)
@@ -1238,19 +1265,25 @@ syncs.push(
   routeSlider('外周の周回', '最後に境界沿いを回る回数。旋回の場所にもなる', 'headlandPasses', 0, 5, 1, (v) => `${v.toFixed(0)} 周`)
 )
 
+// 倍速は段が多いので、ボタンを並べずプルダウンで選ぶ
+const speedSelect = byId<HTMLSelectElement>('speed-select')
+for (const scale of TIME_SCALES) {
+  const option = document.createElement('option')
+  option.value = String(scale)
+  option.textContent = `${scale}×`
+  speedSelect.append(option)
+}
+enhanceSelect(speedSelect)
+speedSelect.addEventListener('change', () => {
+  sim.timeScale = Number(speedSelect.value)
+  // Space などのキー操作が選択の欄に取られないようにする(一覧を閉じるとフォーカスが戻るので、その後で外す)
+  window.setTimeout(() => (speedSelect.parentElement?.querySelector('.app-select') as HTMLElement | null)?.blur())
+})
 syncs.push(
-  addSwitch(
-    byId('speed-switch'),
-    TIME_SCALES.map((scale) => ({
-      value: scale,
-      label: `${scale}×`,
-      title: `${scale} 倍速`
-    })),
-    () => sim.timeScale,
-    (v) => {
-      sim.timeScale = v
-    }
-  ),
+  () => {
+    // 起動時の指定(timescale=)で段に無い倍速のときは、何も選ばない
+    speedSelect.value = TIME_SCALES.includes(sim.timeScale) ? String(sim.timeScale) : ''
+  },
   addSwitch(
     byId('view-switch'),
     CAMERA_MODES.map((mode) => ({
@@ -1603,9 +1636,10 @@ applyWindowSize()
 function applySetting(key: keyof AppSettings): void {
   if (key === 'pixelRatio') resize()
   else if (key === 'windowSize') applyWindowSize()
-  else if (key === 'showFps') fpsCounter.hidden = !settings.showFps
+  else if (key === 'showFps') perfPanel.hidden = !settings.showFps
   else if (key === 'showHint') byId('view-hint').hidden = !settings.showHint
   else if (key === 'grassDistance') grassBlades.setRadius(settings.grassDistance)
+  else if (key === 'dofSamples') dofPass.setSamples(settings.dofSamples)
   else if (key === 'grassBlades') bladeSettings.show = settings.grassBlades
   else if (key === 'grassStripe') ground.uniforms.uStripe.value = settings.grassStripe
   else if (key === 'grassTilt') ground.uniforms.uTilt.value = settings.grassTilt
@@ -1667,6 +1701,18 @@ const toggleSettings = setupSettings(
           title:
             'ウィンドウの中身(タイトルバーを除く)の大きさ。画面の表示倍率を掛けた、見た目の大きさです。選ぶとすぐに変わり、次の起動もこの大きさで開きます。小さくすると描く画素が減って軽くなります',
           options: WINDOW_SIZES.map((height) => ({ value: height, label: `${(height * 16) / 9} × ${height}` }))
+        },
+        {
+          type: 'choice',
+          key: 'dofSamples',
+          label: '被写界深度の品質',
+          title:
+            '被写界深度(カメラパネルで入り切り)のぼけを作るとき、1 画素あたりに拾う点の数。低 24、中 48、高 80。下げると軽くなり、大きなぼけが少しざらつきます。ピントの合った所は変わりません',
+          options: [
+            { value: 24, label: '低' },
+            { value: 48, label: '中' },
+            { value: 80, label: '高' }
+          ]
         }
       ]
     },
@@ -1811,7 +1857,7 @@ const toggleSettings = setupSettings(
     {
       title: '表示',
       items: [
-        { type: 'check', key: 'showFps', label: 'FPS を表示', title: '左上に、1 秒あたりの描画の回数と、1 フレームの処理にかかった時間を出します' },
+        { type: 'check', key: 'showFps', label: '性能を表示', title: '左上に「性能」のパネル(fps、処理時間、ドローコール、ポリゴンや頂点の数など)を出します。見出しを押すと、fps だけの表示に畳めます' },
         { type: 'check', key: 'showHint', label: '操作の案内を表示', title: '画面の上に、操作の案内を出します' },
         { type: 'check', key: 'clippings', label: '刈りカスを表示', title: '刈刃から飛ぶ刈りカスの粒を描きます' },
         {
@@ -1928,7 +1974,7 @@ initScreenRecorder({
 })
 if (query.get('settings') === '1') toggleSettings()
 input.onPress('Slash', toggleHelp)
-// 数字キーで、その番号の機体に乗る(乗っていれば乗り移る)。倍速は右下の切り替えで選ぶ
+// 数字キーで、その番号の機体に乗る(乗っていれば乗り移る)。倍速は右下のプルダウンで選ぶ
 for (let i = 0; i < MAX_MOWERS; i++) {
   input.onPress(`Digit${i + 1}`, () => {
     if (dialogOpen()) return false
@@ -1939,6 +1985,7 @@ for (let i = 0; i < MAX_MOWERS; i++) {
 // 右の列のパネルの値を、前回の値に戻す(次の起動のために保存もする)。
 // 起動時の指定(動作確認用)があるときは、その値で確かめられるよう、戻しも保存もしない(マップの指定だけは例外)
 if ([...query.keys()].every((key) => key === 'map')) restorePanelValues()
+rememberPanelFolds()
 syncUi()
 
 // ------------------------------------------------ シミュレーション
@@ -2027,8 +2074,35 @@ function updateReadouts(dt: number, workMs: number): void {
     logTimer = 0
     console.warn(`fps ${fps.toFixed(0)}  ${frameMs.toFixed(1)} ms`)
   }
-  const fpsText = `${fps.toFixed(0)} fps  ${frameMs.toFixed(1)} ms`
-  if (fpsCounter.textContent !== fpsText) fpsCounter.textContent = fpsText
+  updatePerf(dt)
+}
+
+/** 数を桁区切りで(大きい数は「万」でまとめる) */
+function formatCount(n: number): string {
+  const v = Math.round(n)
+  return v >= 1e5 ? `${(v / 1e4).toFixed(1)} 万` : v.toLocaleString('en-US')
+}
+
+// 「性能」パネル。数はフレームごとに揺れるので、読めるよう 0.25 秒ごとに書き換える
+let perfTimer = 0
+function updatePerf(dt: number): void {
+  const info = renderer.info
+  if (!perfPanel.hidden && (perfTimer += dt) >= 0.25) {
+    perfTimer = 0
+    const fpsText = `${fps.toFixed(0)} fps`
+    if (perfFps.textContent !== fpsText) perfFps.textContent = fpsText
+    setPerfReadout({
+      frame: `${(1000 / Math.max(fps, 1)).toFixed(1)} ms`,
+      work: `${frameMs.toFixed(1)} ms`,
+      calls: formatCount(info.render.calls),
+      triangles: formatCount(info.render.triangles),
+      vertices: formatCount(drawStats.vertices),
+      lines: `${formatCount(info.render.lines)} / ${formatCount(info.render.points)}`,
+      geometries: formatCount(info.memory.geometries),
+      textures: formatCount(info.memory.textures),
+      programs: formatCount(info.programs?.length ?? 0)
+    })
+  }
 }
 
 let focusDistance = 0
@@ -2193,6 +2267,9 @@ function frame(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1)
   last = now
   const workStart = performance.now()
+  // 「性能」パネルの描画の数を、このフレームの分から数え直す
+  renderer.info.reset()
+  drawStats.vertices = 0
   profiler?.begin('sim')
 
   if (timeSettings.timelapse) {

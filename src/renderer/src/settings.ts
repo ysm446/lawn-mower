@@ -11,7 +11,9 @@ export interface AppSettings {
   pixelRatio: number
   /** ウィンドウの中身の高さ(画面の表示倍率を掛けた見た目の大きさ、16:9)。起動時と選んだときに合わせる */
   windowSize: number
-  /** 左上に fps を出すか */
+  /** 被写界深度で、1 画素あたりに拾う点の数(品質)。少ないほど軽い */
+  dofSamples: number
+  /** 左上に「性能」のパネル(fps、処理時間、描画の数)を出すか */
   showFps: boolean
   /** 機体のまわりの芝を、葉の 1 枚ずつまで描くか */
   grassBlades: boolean
@@ -59,6 +61,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fpsLimit: 0,
   pixelRatio: 2,
   windowSize: 1080,
+  dofSamples: 80,
   showFps: true,
   grassBlades: true,
   grassDistance: 20,

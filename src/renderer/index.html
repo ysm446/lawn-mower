@@ -20,7 +20,12 @@
           <dl id="status-readout" class="readout"></dl>
         </details>
       </section>
-      <div id="fps-counter"></div>
+      <section id="perf-panel">
+        <details class="panel-fold" data-fold="性能">
+          <summary><span>性能</span><span id="perf-fps" class="summary-value"></span></summary>
+          <dl id="perf-readout" class="readout"></dl>
+        </details>
+      </section>
       <section id="normal-panel" hidden>
         <div class="normal-title">法線マップ(刈った地面)</div>
         <canvas id="normal-canvas"></canvas>
@@ -83,7 +88,10 @@
     </div>
 
     <div id="bottom-right">
-      <div id="speed-switch" class="switch" role="group" aria-label="倍速"></div>
+      <div id="speed-box" title="倍速">
+        <label for="speed-select">倍速</label>
+        <select id="speed-select"></select>
+      </div>
       <div id="view-switch" class="switch" role="group" aria-label="視点"></div>
     </div>
 

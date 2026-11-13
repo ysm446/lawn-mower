@@ -103,11 +103,12 @@ button:active:not(:disabled) {
 }
 
 #status-panel,
-#fps-counter,
+#perf-panel,
 #normal-panel,
 #screenshot-toast,
 #top-right button,
 #view-hint,
+#speed-box,
 .side-panel,
 .switch,
 :is(#key-help, #settings)::before {
@@ -115,8 +116,10 @@ button:active:not(:disabled) {
 }
 
 #status-panel,
+#perf-panel,
 #normal-panel,
 #top-right button,
+#speed-box,
 .side-panel,
 .switch,
 :is(#key-help, #settings)::before {
@@ -136,7 +139,8 @@ button:active:not(:disabled) {
   pointer-events: none;
 }
 
-#status-panel {
+#status-panel,
+#perf-panel {
   width: 220px;
   padding: 10px 16px;
   background: var(--panel);
@@ -144,10 +148,22 @@ button:active:not(:disabled) {
   pointer-events: auto;
 }
 
+#perf-panel[hidden] {
+  display: none;
+}
+
 /* 閉じているときは見出しの幅まで縮める(右の列のパネルと同じ) */
-#status-panel:has(> .panel-fold:not([open])) {
+:is(#status-panel, #perf-panel):has(> .panel-fold:not([open])) {
   width: max-content;
   padding-block: 6px;
+}
+
+/* 見出しの行に添える値(閉じていても見える fps など) */
+.panel-fold > summary .summary-value {
+  margin-left: auto;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .readout {
@@ -171,16 +187,6 @@ button:active:not(:disabled) {
   margin: 0;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-#fps-counter {
-  padding: 2px 8px;
-  color: var(--text-2);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: pre;
-  background: var(--panel);
-  border-radius: 6px;
 }
 
 /* 動作確認用: 刈った地面の法線マップ(設定の「動作確認」の「法線マップを表示」) */
@@ -742,8 +748,21 @@ input[type='checkbox']:checked {
   border-color: transparent;
 }
 
-#speed-switch button {
-  min-width: 44px;
+/* 倍速のプルダウン。切り替えと同じ台に、ラベルと選択の欄を載せる */
+#speed-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 3px 3px 10px;
+  color: var(--text-2);
+  font-size: 13px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+
+#speed-box .app-select {
+  min-width: 76px;
+  min-height: 30px;
   font-variant-numeric: tabular-nums;
 }
 

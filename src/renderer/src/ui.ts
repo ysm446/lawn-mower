@@ -93,6 +93,37 @@ export function restorePanelValues(): void {
   window.addEventListener('beforeunload', savePanelValues)
 }
 
+const FOLD_STORAGE_KEY = 'lawn-mower-panel-folds'
+
+/**
+ * 右の列のパネルと左上の「状態」の開閉を記録し、次の起動で同じ開き方に戻す。
+ * 鍵は見出しの文字(見出しに値を添えるパネルは data-fold)。記録の無いパネル(初めての起動、新しく足したパネル)は index.html の open のまま
+ */
+export function rememberPanelFolds(): void {
+  const folds = [...document.querySelectorAll<HTMLDetailsElement>('#right-stack .panel-fold, #top-left .panel-fold')]
+  const keyOf = (fold: HTMLDetailsElement): string =>
+    fold.dataset.fold ?? fold.querySelector('summary')?.textContent?.trim() ?? ''
+  let saved: Record<string, unknown> = {}
+  try {
+    saved = JSON.parse(window.localStorage.getItem(FOLD_STORAGE_KEY) ?? '{}') as Record<string, unknown>
+  } catch {
+    saved = {}
+  }
+  for (const fold of folds) {
+    const open = saved[keyOf(fold)]
+    if (typeof open === 'boolean') fold.open = open
+    fold.addEventListener('toggle', () => {
+      const values: Record<string, boolean> = {}
+      for (const f of folds) values[keyOf(f)] = f.open
+      try {
+        window.localStorage.setItem(FOLD_STORAGE_KEY, JSON.stringify(values))
+      } catch {
+        // 保存できなくても、動作は続ける
+      }
+    })
+  }
+}
+
 export interface SliderSpec {
   label: string
   title?: string

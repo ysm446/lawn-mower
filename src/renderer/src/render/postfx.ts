@@ -129,6 +129,7 @@ export class MeterPass extends Pass {
 
 // ------------------------------------------------ 被写界深度
 
+/** 1 画素あたりに拾う点の数の既定。設定の「被写界深度の品質」で変える(setSamples) */
 const DOF_SAMPLES = 80
 
 const DOF_FRAGMENT = /* glsl */ `
@@ -177,8 +178,8 @@ void main() {
   const float GOLDEN_ANGLE = 2.39996323;
   // 拾う位置を画素ごとに回す。全画素で同じ並びだと、拾い残しが規則的な粒になって見える
   float spin = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) * 6.2831853;
-  for (int i = 1; i < ${DOF_SAMPLES}; i++) {
-    float t = float(i) / float(${DOF_SAMPLES});
+  for (int i = 1; i < DOF_SAMPLES; i++) {
+    float t = float(i) / float(DOF_SAMPLES);
     float radius = sqrt(t) * uMaxRadius;
     float angle = float(i) * GOLDEN_ANGLE + spin;
     vec2 uv = vUv + vec2(cos(angle), sin(angle)) * radius / uResolution;
@@ -246,6 +247,7 @@ export class DofPass extends Pass {
   private readonly material = new ShaderMaterial({
     vertexShader: QUAD_VERTEX,
     fragmentShader: DOF_FRAGMENT,
+    defines: { DOF_SAMPLES },
     uniforms: {
       tDiffuse: { value: null },
       tDepth: { value: null },
@@ -295,6 +297,14 @@ export class DofPass extends Pass {
     this.material.uniforms.uResolution.value.set(width, height)
     // ぼけの上限は画面の高さに比例させる
     this.material.uniforms.uMaxRadius.value = Math.max(4, height * 0.016)
+  }
+
+  /** 1 画素あたりに拾う点の数。少ないほど軽く、大きなぼけがざらつく。変えるとシェーダーを作り直す */
+  setSamples(samples: number): void {
+    const n = Math.max(2, Math.round(samples))
+    if (this.material.defines.DOF_SAMPLES === n) return
+    this.material.defines.DOF_SAMPLES = n
+    this.material.needsUpdate = true
   }
 
   update(s: DofSettings): void {
