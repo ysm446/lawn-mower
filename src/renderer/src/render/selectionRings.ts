@@ -114,14 +114,16 @@ export class SelectionRings {
         const z = target.z + Math.sin(angle) * radius
         return [x, this.terrain.heightAt(x, z) + lift, z]
       }
-      for (let i = 0; i < RING_SEGMENTS; i++) {
-        // 切れ目に当たる所は描かない
-        const u0 = i / RING_SEGMENTS
-        const u1 = (i + 1) / RING_SEGMENTS
-        const mid = ((u0 + u1) / 2 + this.spin) * RING_GAPS
-        if (mid - Math.floor(mid) < GAP_SHARE * RING_GAPS) continue
-        const a0 = u0 * Math.PI * 2
-        const a1 = u1 * Math.PI * 2
+      // 切れ目と切れ目の間の弧を、回った角度から直接作る(分割の区切りごとに切れ目を飛ばすと、
+      // 切れ目が 1 区切りずつ跳んで動き、なめらかに回らない)
+      const arc = 1 / RING_GAPS - GAP_SHARE
+      const pieces = Math.max(1, Math.round(RING_SEGMENTS / RING_GAPS))
+      for (let i = 0; i < RING_GAPS * pieces; i++) {
+        const k = Math.floor(i / pieces)
+        const j = i % pieces
+        const start = k / RING_GAPS + GAP_SHARE / 2 - this.spin
+        const a0 = (start + (arc * j) / pieces) * Math.PI * 2
+        const a1 = (start + (arc * (j + 1)) / pieces) * Math.PI * 2
         const i0 = point(inner, a0, FILL_LIFT)
         const o0 = point(outer, a0, FILL_LIFT)
         const i1 = point(inner, a1, FILL_LIFT)
