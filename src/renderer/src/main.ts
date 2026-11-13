@@ -1542,6 +1542,7 @@ const toggleHelp = setupHelp([
       { keys: ['Shift', '+', '左ドラッグ'], text: '四角で囲んだ機体を選ぶ(選んでいる機体に足す)' },
       { keys: ['1', '〜', '8'], text: 'その番号の機体を選ぶ(Shift で足す)。Tab で次の機体を選ぶ' },
       { keys: ['右クリック'], text: '選んでいる機体に、その場所の区画を刈らせる(自動運転で向かう。何台かなら分担する。刈り終えた区画はもう一度刈る)' },
+      { keys: ['F'], text: '選んでいる機体のいる所へ、見る場所を移す(押した時点の位置へ。機体は追わない。何台かならその真ん中)' },
       { keys: ['Esc'], text: '選ぶのをやめる' },
       { keys: ['P'], text: '選んでいる機体の自動運転の開始と停止(選んでいなければ全台)' },
       { keys: ['左ドラッグ', '右ドラッグ', 'ホイール', '↑', '←', '↓', '→'], text: '誰にも乗っていない俯瞰と同じく、回り込む、動かす、寄る' }
@@ -1625,6 +1626,18 @@ input.onPress('Escape', () => {
     selection = []
     selectionChanged()
   } else leaveMower()
+})
+// 管制の視点で、選んでいる機体のいる所へ見る場所を移す(押した時点の位置へ。そのあとは追わない)。
+// 何台か選んでいるときは、その真ん中
+input.onPress('KeyF', () => {
+  if (dialogOpen() || rig.mode !== 'command' || selection.length === 0) return false
+  let x = 0
+  let z = 0
+  for (const unit of selection) {
+    x += unit.state.x
+    z += unit.state.z
+  }
+  rig.lookAt(x / selection.length, z / selection.length, terrain)
 })
 /** Shift を押しているか(管制の視点で、選んでいる機体に足すとき) */
 const shiftDown = (): boolean => input.isDown('ShiftLeft') || input.isDown('ShiftRight')
@@ -1806,7 +1819,7 @@ function updateViewHint(): void {
   const level = rig.orbitLevel
   const orbiting = `旋回中 ${level > 0 ? '右回り' : '左回り'} 速さ ${Math.abs(level)} / ${ORBIT_LEVELS}(Q / E で速さと向き、W / A / S / D で回転と傾き)`
   if (rig.mode === 'command') {
-    const chosen = selection.length > 0 ? `${selection.map((m) => m.name).join('、')}を選択中。右クリックで、その場所の区画を刈らせる。` : ''
+    const chosen = selection.length > 0 ? `${selection.map((m) => m.name).join('、')}を選択中。右クリックで、その場所の区画を刈らせる。F でその場所を見る。` : ''
     text =
       level === 0
         ? `管制: ${chosen}クリックで選ぶ(Shift で足す、Shift+ドラッグで囲む)、Esc で選ぶのをやめる。W / A / S / D で回す、右ドラッグか矢印キーで動かす、ホイールで寄る`

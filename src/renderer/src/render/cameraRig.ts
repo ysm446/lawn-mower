@@ -321,6 +321,30 @@ export class CameraRig {
     this.keepViewYaw()
   }
 
+  /**
+   * 誰にも乗っていない俯瞰と管制の視点で、見る場所を地面の (x, z) へ移す(管制で F を押したとき)。
+   * カメラの向きと距離はそのままで、平行に動かす。移る間はなめらかにつなぐ。移ったあとは、その場所を見たまま(機体は追わない)
+   */
+  lookAt(x: number, z: number, terrain: Terrain): void {
+    if (!this.free) return
+    this.beginTransition()
+    const target = this.controls.target
+    const dx = x - target.x
+    const dz = z - target.z
+    const dy = terrain.heightAt(x, z) + 0.8 - target.y
+    target.x += dx
+    target.y += dy
+    target.z += dz
+    // 移る途中の混ぜた位置ではなく、視点本来のカメラの位置から動かす
+    const position = this.blended ? this.restPosition : this.camera.position
+    position.x += dx
+    position.y += dy
+    position.z += dz
+    this.freeFocus.set(target.x, 0, target.z)
+    this.panX = 0
+    this.panY = 0
+  }
+
   /** 誰にも乗っていないときの俯瞰で、見る場所を動かすキーの向き(x は右、y は画面の奥が正)。毎フレーム呼ぶ */
   setPanInput(x: number, y: number): void {
     this.panInputX = x
