@@ -31,6 +31,12 @@ const SHADOW_LIGHT_FAR = 900
 /** 影の面の向きへのずらし(影のちらつきを抑える) */
 const SHADOW_NORMAL_BIAS = 0.04
 /**
+ * 影の地図にだけ描く物を置くレイヤー。影の地図のカメラはこのレイヤーとふだんのレイヤー(0)を描き、
+ * 場面のカメラは 0 だけを描く(three.js は、影のカメラに 0 以外のレイヤーがあれば、場面のカメラの代わりにそれを使う)。
+ * 樹木は、画面に描く分と影を落とす分を別々に視錐台で選ぶので、影を落とす分をここに置く(trees.ts)
+ */
+export const SHADOW_ONLY_LAYER = 1
+/**
  * 霞を、実際の大気より何倍濃く掛けるか。実際の大気では数 km 先でもほとんど霞まないが、
  * この場面は数百 m から数 km の広さなので、遠近感が出るように濃くする
  */
@@ -283,7 +289,7 @@ export class Lighting {
       lightMargin: 60,
       shadowBias: -0.0002
     })
-    for (const light of this.csm.lights) light.shadow.normalBias = SHADOW_NORMAL_BIAS
+    this.setupShadowLights()
 
     // 霞は材質に差し込んだ計算で掛けるので、three.js の霧は使わない
     scene.add(this.hemisphere, this.sky)
@@ -385,6 +391,14 @@ export class Lighting {
     }
   }
 
+  /** 段ごとの光源の影の設定。光源を作ったときに呼ぶ */
+  private setupShadowLights(): void {
+    for (const light of this.csm.lights) {
+      light.shadow.normalBias = SHADOW_NORMAL_BIAS
+      light.shadow.camera.layers.enable(SHADOW_ONLY_LAYER)
+    }
+  }
+
   /**
    * 影の段数(カスケードの数)を変える。段ごとの光源を作り直し、影に対応させた材質の段数の定義を書き換える
    * (材質のシェーダーは作り直される)。CSM そのものは作り直さない。材質に差し込んだ処理が、この CSM を参照しているため
@@ -401,7 +415,7 @@ export class Lighting {
     csm.lights.length = 0
     csm.cascades = count
     csm._createLights()
-    for (const light of csm.lights) light.shadow.normalBias = SHADOW_NORMAL_BIAS
+    this.setupShadowLights()
     for (const material of csm.shaders.keys() as IterableIterator<Material>) {
       material.defines = { ...material.defines, CSM_CASCADES: count }
       material.needsUpdate = true
