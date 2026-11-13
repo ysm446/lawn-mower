@@ -160,6 +160,15 @@ const LEAF_TRANSLUCENCY_STRENGTH = 5
 const LEAF_TRANSLUCENCY_FOCUS = 3
 /** 樹冠の、太陽と反対の側の葉が、どこから見ても透けて見える分 */
 const LEAF_TRANSLUCENCY_BACK = 0.3
+// 葉ごとのばらつき。葉 1 枚ずつの乱数(きらめき用の隠しテクスチャ)で透けやすさを変え、
+// 葉の板が光に正対しているほど(葉の面を光がまっすぐ通るほど)強く透けるようにする。同じ側の葉でも明るい葉と暗い葉が混ざる
+/** 乱数で変える透けやすさの下限(上限は 1) */
+const LEAF_TRANSLUCENCY_RANDOM_MIN = 0.35
+/** 葉の面の向きによらず透ける分(残りは、葉の面が光に正対するほど増える) */
+const LEAF_TRANSLUCENCY_FACING_MIN = 0.4
+/** ばらつきを入れても、全体の明るさが変わらないように割る値(上の 2 つの掛け算の平均。葉の向きはばらばらとして) */
+const LEAF_TRANSLUCENCY_VARIATION_MEAN =
+  ((LEAF_TRANSLUCENCY_RANDOM_MIN + 1) / 2) * (LEAF_TRANSLUCENCY_FACING_MIN + (1 - LEAF_TRANSLUCENCY_FACING_MIN) * 0.5)
 
 /** RE_Direct_Leaf の中で、影を入れた直接光ごとに呼ぶ */
 const LEAF_TRANSLUCENCY_FRAGMENT = /* glsl */ `
@@ -172,6 +181,11 @@ void leafTranslucency(const in IncidentLight directLight, const in vec3 geometry
   // 光の方を向いて見るほど強い(前方への散乱)
   float forward = pow(max(dot(-geometryViewDir, directLight.direction), 0.0), ${LEAF_TRANSLUCENCY_FOCUS.toFixed(1)});
   float translucency = (forward + ${LEAF_TRANSLUCENCY_BACK.toFixed(2)} * back) * back * uLeafTranslucency;
+  // 葉ごとのばらつき: 葉 1 枚ずつの乱数(R を、葉のある所 B で割って戻す)と、葉の板が光に正対している度合い
+  vec3 leafRandom = texture2D(uLeafGlintMap, vMapUv).rgb;
+  float variety = mix(${LEAF_TRANSLUCENCY_RANDOM_MIN.toFixed(2)}, 1.0, clamp(leafRandom.r / max(leafRandom.b, 1e-3), 0.0, 1.0));
+  float facing = ${LEAF_TRANSLUCENCY_FACING_MIN.toFixed(2)} + ${(1 - LEAF_TRANSLUCENCY_FACING_MIN).toFixed(2)} * abs(dot(normalize(vLeafGlint), directLight.direction));
+  translucency *= variety * facing / ${LEAF_TRANSLUCENCY_VARIATION_MEAN.toFixed(4)};
   // 葉を透けた光は、黄色みの強い緑になる。directLight.color は影で暗くなった後の光なので、陰の葉は透けない
   vec3 transmitted = material.diffuseColor * vec3(1.1, 1.15, 0.65);
   reflectedLight.directDiffuse += directLight.color * transmitted * (RECIPROCAL_PI * translucency * ${LEAF_TRANSLUCENCY_STRENGTH.toFixed(1)});
