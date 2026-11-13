@@ -37,6 +37,23 @@ const CELL = 192
 /** 板の絵の、透明な所を切り抜く境目 */
 const IMPOSTOR_ALPHA_TEST = 0.5
 
+// 遠くの木のきらめき。細かいモデルの葉のきらめき(trees.ts)は遠くで消すので、板の木は光らせず、
+// かわりに葉 1 枚のきらめきを平均した明るさを、日の当たる葉に足す(光の量を一定にする。値は trees.ts が求めて渡す)
+
+/** 遠くの木のきらめきに使う値(Trees が持ち、細かいモデルの葉のきらめきと共有する) */
+export interface ImpostorGlint {
+  uniforms: {
+    /** 葉のきらめきの強さの倍率(設定でオフのときは 0) */
+    uLeafGlint: { value: number }
+    /** 葉 1 枚のきらめきを平均した明るさ */
+    uLeafGlintAverage: { value: number }
+  }
+  /** 樹種ごとの強さの倍率(針葉樹は弱く) */
+  scale: number
+  /** 光の色に葉の色を混ぜる割合(葉のきらめきと同じ) */
+  tint: number
+}
+
 /** 絵を撮るモデル */
 export interface ImpostorSource {
   bark: BufferGeometry
@@ -330,12 +347,36 @@ const IMPOSTOR_NORMAL = /* glsl */ `
 }
 `
 
+/** lights_physical_pars_fragment のあとに置き、太陽などの直接光を受けるたびに、葉のきらめきを平均した明るさを足す */
+const IMPOSTOR_GLINT_FRAGMENT = /* glsl */ `
+uniform float uLeafGlint;
+uniform float uLeafGlintAverage;
+uniform float uImpostorGlintScale;
+uniform float uImpostorGlintTint;
+void RE_Direct_Impostor(const in IncidentLight directLight, const in vec3 geometryPosition, const in vec3 geometryNormal,
+  const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material,
+  inout ReflectedLight reflectedLight) {
+  RE_Direct_Physical(directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight);
+  if (uLeafGlint <= 0.0) return;
+  // 葉の所だけ(法線の絵の透明度が、葉なら 1、幹なら 0)
+  float leaf = texture2D(uImpostorNormal, vMapUv).a;
+  if (leaf < 0.5) return;
+  vec3 leafHue = material.diffuseColor / max(max(material.diffuseColor.r, max(material.diffuseColor.g, material.diffuseColor.b)), 1e-3);
+  vec3 glintColor = mix(vec3(1.0), leafHue, uImpostorGlintTint);
+  // directLight.color は影で暗くなった後の光なので、影の中の木は明るくならない
+  reflectedLight.directSpecular += directLight.color * glintColor * (uLeafGlintAverage * uLeafGlint * uImpostorGlintScale);
+}
+#undef RE_Direct
+#define RE_Direct RE_Direct_Impostor
+`
+
 /** 1 つのモデルのインポスターを並べるメッシュ。index は図集を作ったときのモデルの順番。木ごとの葉の色は aTint に入れる */
 export function createImpostorMesh(
   atlas: ImpostorAtlas,
   index: number,
   barkColor: Color,
-  capacity: number
+  capacity: number,
+  glint: ImpostorGlint
 ): InstancedMesh {
   const frame = atlas.frames[index]
   const geometry = new PlaneGeometry(frame.half * 2, frame.half * 2)
@@ -346,7 +387,10 @@ export function createImpostorMesh(
     uImpostorRows: { value: atlas.rows },
     uImpostorCenter: { value: frame.centerY },
     uImpostorNormal: { value: atlas.normal },
-    uBarkColor: { value: barkColor }
+    uBarkColor: { value: barkColor },
+    ...glint.uniforms,
+    uImpostorGlintScale: { value: glint.scale },
+    uImpostorGlintTint: { value: glint.tint }
   }
   const material = new MeshStandardMaterial({
     color: 0xffffff,
@@ -367,6 +411,7 @@ export function createImpostorMesh(
       .replace('#include <common>', '#include <common>\n' + IMPOSTOR_FRAGMENT_HEADER)
       .replace('#include <map_fragment>', IMPOSTOR_COLOR)
       .replace('#include <normal_fragment_begin>', IMPOSTOR_NORMAL)
+      .replace('#include <lights_physical_pars_fragment>', '#include <lights_physical_pars_fragment>\n' + IMPOSTOR_GLINT_FRAGMENT)
   }
   material.customProgramCacheKey = () => 'tree-impostor'
 

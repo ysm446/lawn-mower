@@ -674,6 +674,8 @@ const PATH_COLORS = [
   OVERLAY_PALETTE.amber,
   OVERLAY_PALETTE.mint
 ]
+/** カメラの見る向き(葉のきらめきの平均の明るさを決めるのに使う。毎フレーム使い回す) */
+const glintView = new Vector3()
 /** 管制の視点で選んだ機体の輪の色(経路と同じ色) */
 const RING_COLORS = PATH_COLORS.map((css) => overlayColor(css))
 const pathLines = new Map<MowerUnit, PathLine>()
@@ -2700,6 +2702,8 @@ function frame(now: number): void {
   const swayStep = timeSettings.timelapse ? simSeconds : dt * Math.min(sim.timeScale, settings.swayTimeScale)
   windTime = (windTime + swayStep) % 4096
   treeModels.update(windTime, windSettings.strength, rig.camera.position)
+  treeModels.setGlintView(Math.tan((rig.camera.fov * Math.PI) / 360), renderer.domElement.height)
+  treeModels.setGlintLight(lighting.sunDirection, rig.camera.getWorldDirection(glintView))
   // 草の波も、木の揺れと同じ時刻と強さで動かす
   ground.uniforms.uWindTime.value = windTime
   ground.uniforms.uWindStrength.value = windSettings.strength

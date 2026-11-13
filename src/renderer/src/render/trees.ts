@@ -57,8 +57,8 @@ const LEAF_ALPHA_TEST = 0.4
 // 葉の板の向き(aLeafNormal)で足す。向きは板ごとにずれた周期で揺らすので、照り返す葉が次々に入れ替わって瞬く。
 // 板に描いた葉 1 枚ずつで照り返す向きをずらす(葉ごとの乱数は、きらめき用の隠しテクスチャ。leafTexture.ts)ので、
 // 光るときは葉 1 枚の形のまま光る
-/** 照り返しの強さ */
-const LEAF_GLINT_STRENGTH = 2
+/** 照り返しの強さ(2 では強すぎて、設定で 0.5 倍にして使っていた) */
+const LEAF_GLINT_STRENGTH = 1
 /** 照り返しの鋭さ(大きいほど、光る葉が少なく、光り方が鋭くなる) */
 const LEAF_GLINT_SHARPNESS = 8
 /** 葉ごとに照り返す向きをずらす大きさ */
@@ -73,6 +73,82 @@ const LEAF_GLINT_WOBBLE = 0.45
  * 葉 1 枚の形で光るので、150 m 先でも葉が数画素に写り、簡略モデル(LOD1)の木まで届く */
 const LEAF_GLINT_FADE_START = 100
 const LEAF_GLINT_FADE_END = 300
+/**
+ * 上の距離を決めたときの見え方。焦点距離 50 mm(36 mm 判、16:9 の画面で縦の画角の半分の tan が 0.2025)で、
+ * 描画の高さが 1620 画素(1920×1080 のウィンドウを表示倍率 150% で描いたとき)。
+ * 望遠にしたり描画を細かくしたりすると、同じ距離の葉が画面に大きく写るので、その割合だけ消す距離を延ばす(setGlintView)
+ */
+const LEAF_GLINT_REFERENCE_TAN = 0.2025
+const LEAF_GLINT_REFERENCE_HEIGHT = 1620
+
+// 葉 1 枚のきらめきが消えていく距離から先と、インポスターの木は、きらめきを平均した明るさを足す(光の量を一定にする)。
+// 葉の向きがばらばらだとして、葉 1 枚のきらめき(葉の照り返し × 太陽の当たり具合)を平均した値を、
+// 太陽へ向かう向きとカメラへ向かう向きのなす角ごとに、起動時に数値で求めておく。近くで光って見える量と、
+// 遠くで明るくなる量がそろうので、近づいても遠ざかっても、木の明るさが変わらない
+/** 平均の表の細かさ(太陽とカメラの向きのなす角の cos を -1〜1 で何段に分けるか) */
+const GLINT_AVERAGE_STEPS = 33
+/** 平均を求める葉の向きの数 */
+const GLINT_AVERAGE_SAMPLES = 6000
+/** 葉の板のうち、葉の形のある所の割合(きらめきの spot の平均) */
+const GLINT_SPOT_AVERAGE = 0.9
+/**
+ * 見た目の明るさでそろえるための割合。近くの葉のきらめきは、少数の葉がとても明るく光るので、画面に出すときの
+ * 明るさの丸め(トーンマッピング)で頭打ちになり、見た目の平均は計算上の平均よりずっと小さい。
+ * 遠くに足す明るさは頭打ちにならないので、この割合だけ控えめにする(画面を見て合わせた値)
+ */
+const GLINT_AVERAGE_PERCEIVED = 0.2
+
+/** 葉 1 枚のきらめきの平均(強さの倍率を掛ける前)を、太陽とカメラの向きのなす角の cos ごとに並べた表 */
+const glintAverageTable = ((): Float32Array => {
+  // 決まった並びの乱数(起動するたびに同じ値になるように)
+  let seed = 12345
+  const random = (): number => (seed = (seed * 16807) % 2147483647) / 2147483647
+  // 葉の向き: 向きはばらばら。両面の板なので、カメラの方を向いた面で光る(カメラへ向かう向きを z とする)。
+  // シェーダーと同じく、葉ごとの乱数で向きをずらす
+  const normals: number[] = []
+  for (let i = 0; i < GLINT_AVERAGE_SAMPLES; i++) {
+    const z = random() * 2 - 1
+    const a = random() * Math.PI * 2
+    const r = Math.sqrt(1 - z * z)
+    let nx = r * Math.cos(a)
+    let ny = r * Math.sin(a)
+    let nz = z
+    if (nz < 0) {
+      nx = -nx
+      ny = -ny
+      nz = -nz
+    }
+    const jx = random() - 0.5
+    const jy = random() - 0.5
+    nx += jx * LEAF_GLINT_SCATTER
+    ny += jy * LEAF_GLINT_SCATTER
+    nz += jx * jy * 2 * LEAF_GLINT_SCATTER
+    const length = Math.hypot(nx, ny, nz)
+    normals.push(nx / length, ny / length, nz / length)
+  }
+  const table = new Float32Array(GLINT_AVERAGE_STEPS)
+  for (let step = 0; step < GLINT_AVERAGE_STEPS; step++) {
+    const c = -1 + (2 * step) / (GLINT_AVERAGE_STEPS - 1)
+    const s = Math.sqrt(Math.max(0, 1 - c * c))
+    // 太陽へ向かう向き l(xz 面の中)と、カメラへ向かう向き v = (0, 0, 1) の中間の向き h
+    const lx = s
+    const lz = c
+    const hLength = Math.hypot(lx, 1 + lz)
+    if (hLength < 1e-6) continue
+    const hx = lx / hLength
+    const hz = (1 + lz) / hLength
+    let sum = 0
+    for (let i = 0; i < normals.length; i += 3) {
+      const nl = normals[i] * lx + normals[i + 2] * lz
+      if (nl <= 0) continue
+      const nh = normals[i] * hx + normals[i + 2] * hz
+      if (nh <= 0) continue
+      sum += Math.pow(nh, LEAF_GLINT_SHARPNESS) * nl
+    }
+    table[step] = (sum / GLINT_AVERAGE_SAMPLES) * GLINT_SPOT_AVERAGE
+  }
+  return table
+})()
 
 // 葉の透け(表現)。逆光で木を見たとき、日が葉を透けて黄緑に明るく見えるようにする。
 // 逆光で見える葉の多くは、手前の葉の影に入っている。影を入れた光で透けを描くとほとんど光らないので、
@@ -128,18 +204,31 @@ const LEAF_GLINT_VERTEX = /* glsl */ `
 const LEAF_GLINT_FRAGMENT = /* glsl */ `
 uniform float uLeafGlint;
 uniform float uLeafGlintScale;
+uniform float uLeafGlintReach;
+uniform float uLeafGlintAverage;
 uniform sampler2D uLeafGlintMap;
 uniform float uLeafTranslucency;
 uniform vec3 uSunDirection;
 uniform vec3 uSunLight;
 varying vec3 vLeafGlint;
+// 遠くの葉: 葉 1 枚のきらめきを平均した明るさを足す。weight は葉 1 枚のきらめきが消えた割合(その分だけ置き換える)
+void leafAverageGlint(const in IncidentLight directLight, const in PhysicalMaterial material, float weight,
+  inout ReflectedLight reflectedLight) {
+  vec3 leafHue = material.diffuseColor / max(max(material.diffuseColor.r, max(material.diffuseColor.g, material.diffuseColor.b)), 1e-3);
+  vec3 glintColor = mix(vec3(1.0), leafHue, ${LEAF_GLINT_TINT.toFixed(2)});
+  reflectedLight.directSpecular += directLight.color * glintColor * (uLeafGlintAverage * weight * uLeafGlint * uLeafGlintScale);
+}
 void RE_Direct_Leaf(const in IncidentLight directLight, const in vec3 geometryPosition, const in vec3 geometryNormal,
   const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material,
   inout ReflectedLight reflectedLight) {
   RE_Direct_Physical(directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight);
   // 設定で切ってあるときは光らせない(uLeafGlint が 0)
   if (uLeafGlint <= 0.0) return;
-  float fade = 1.0 - smoothstep(${LEAF_GLINT_FADE_START.toFixed(1)}, ${LEAF_GLINT_FADE_END.toFixed(1)}, length(geometryPosition));
+  // 遠くの葉は画素より小さくなってちらつくので消す。望遠のときは葉が大きく写るので、その分遠くまで残す(uLeafGlintReach)
+  float glintDistance = length(geometryPosition);
+  float fade = 1.0 - smoothstep(${LEAF_GLINT_FADE_START.toFixed(1)}, ${LEAF_GLINT_FADE_END.toFixed(1)}, glintDistance / uLeafGlintReach);
+  // 葉 1 枚のきらめきが消えていく分だけ、平均した明るさに置き換える(光の量を一定にする。インポスターの木も同じ)
+  if (fade < 1.0) leafAverageGlint(directLight, material, 1.0 - fade, reflectedLight);
   if (fade <= 0.0) return;
   // 板に描いた葉 1 枚ずつの乱数(R、G)と、葉のある所(B)。縁では 3 つとも同じ割合で小さくなるので、B で割って戻す
   vec3 glintLeaf = texture2D(uLeafGlintMap, vMapUv).rgb;
@@ -273,6 +362,10 @@ export class Trees {
   /** 葉の透けの強さの倍率(設定の「葉の透け」。0 で透けない)と、透けに使う太陽の向きと光 */
   private readonly leafTranslucency = { value: 1 }
   private readonly leafGlintSpeed = { value: 0.5 }
+  /** 葉のきらめきを消す距離に掛ける倍率(setGlintView)。1 より小さくはしない */
+  private readonly leafGlintReach = { value: 1 }
+  /** 葉 1 枚のきらめきを平均した明るさ(強さの倍率を掛けたもの)。太陽とカメラの向きで変わる(setGlintLight) */
+  private readonly leafGlintAverage = { value: 0 }
   private readonly sunDirection = { value: new Vector3(0, 1, 0) }
   private readonly sunLight = { value: new Color(0, 0, 0) }
   private readonly lodGroups: LodGroup[] = []
@@ -372,6 +465,8 @@ export class Trees {
             ...this.wind,
             uLeafGlint: this.leafGlint,
             uLeafGlintSpeed: this.leafGlintSpeed,
+            uLeafGlintReach: this.leafGlintReach,
+            uLeafGlintAverage: this.leafGlintAverage,
             uLeafGlintScale: { value: kind === 'conifer' ? NEEDLE_GLINT_SCALE : 1 },
             uLeafGlintMap: { value: leafTextures[kind].glint },
             uLeafTranslucency: this.leafTranslucency,
@@ -521,7 +616,14 @@ export class Trees {
                 plain: makeMeshes(v.simple.bark, v.simple.leaves, false)
               }
             : null
-          const impostor = createImpostorMesh(atlas, row, barkColor, members.length)
+          const impostor = createImpostorMesh(atlas, row, barkColor, members.length, {
+            uniforms: {
+              uLeafGlint: this.leafGlint,
+              uLeafGlintAverage: this.leafGlintAverage
+            },
+            scale: v.kind === 'conifer' ? NEEDLE_GLINT_SCALE : 1,
+            tint: LEAF_GLINT_TINT
+          })
           add(impostor, true)
           this.lodGroups.push({ trees: members, matrices, tints, detail, simple, impostor })
         })
@@ -552,6 +654,30 @@ export class Trees {
   /** 葉のきらめきの瞬く速さ(倍) */
   setLeafGlintSpeed(speed: number): void {
     this.leafGlintSpeed.value = speed
+  }
+
+  /**
+   * カメラの画角(縦の画角の半分の tan)と描画の高さ(画素)を伝える。毎フレーム呼ぶ。
+   * 葉が画面に大きく写るほど、きらめきを遠くまで残す(今の見え方より近くでは消さない)
+   */
+  setGlintView(tanHalfFovY: number, height: number): void {
+    const reach = (LEAF_GLINT_REFERENCE_TAN / Math.max(tanHalfFovY, 1e-4)) * (height / LEAF_GLINT_REFERENCE_HEIGHT)
+    this.leafGlintReach.value = Math.max(1, reach)
+  }
+
+  /**
+   * 太陽へ向かう向きと、カメラの見る向きを伝える。毎フレーム呼ぶ。
+   * 遠くの葉とインポスターの木に足す、きらめきを平均した明るさを決める(太陽とカメラの向きのなす角で変わる)
+   */
+  setGlintLight(sunDirection: Vector3, viewDirection: Vector3): void {
+    // カメラへ向かう向きは、見る向きの逆
+    const lengths = sunDirection.length() * viewDirection.length() || 1
+    const c = Math.min(Math.max(-sunDirection.dot(viewDirection) / lengths, -1), 1)
+    const x = ((c + 1) / 2) * (GLINT_AVERAGE_STEPS - 1)
+    const i = Math.min(Math.floor(x), GLINT_AVERAGE_STEPS - 2)
+    const f = x - i
+    const average = glintAverageTable[i] * (1 - f) + glintAverageTable[i + 1] * f
+    this.leafGlintAverage.value = average * LEAF_GLINT_STRENGTH * GLINT_AVERAGE_PERCEIVED
   }
 
   /** 葉の透けの強さ(0 で透けない) */
