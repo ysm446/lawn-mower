@@ -11,6 +11,7 @@ import {
   LinearFilter,
   Mesh,
   RedFormat,
+  RGBAFormat,
   UnsignedByteType,
   Color,
   MeshPhysicalMaterial,
@@ -19,6 +20,7 @@ import {
 } from 'three'
 import type { GrassField } from '../sim/grassField'
 import type { Terrain } from '../sim/terrain'
+import type { Countryside } from '../sim/countryside'
 import type { MowMap } from './mowMap'
 
 export interface GroundUniforms {
@@ -48,6 +50,16 @@ export interface Ground {
   uniforms: GroundUniforms
 }
 
+/** 地面と近景の葉で同じ土地・農道テクスチャを共有する。 */
+export function applyCountryside(ground: Ground, farm: Countryside, terrain: Terrain): void {
+  const texture = new DataTexture(farm.surface, terrain.samples, terrain.samples, RGBAFormat)
+  texture.minFilter = LinearFilter
+  texture.magFilter = LinearFilter
+  texture.needsUpdate = true
+  ground.uniforms.uFarmMap.value = texture
+  ground.uniforms.uFarmEnabled.value = 1
+}
+
 /**
  * 芝の色を求める GLSL。地面と、近景の芝の葉(grassBlades.ts)の両方で使う。
  * 同じ式を使うことで、葉のある範囲と無い範囲の色がつながる。
@@ -74,6 +86,17 @@ uniform vec3 uSunDir; // 太陽の向き
 uniform float uWindTime;
 uniform float uWindStrength;
 uniform vec2 uWindDir;
+uniform sampler2D uFarmMap;
+uniform float uFarmEnabled;
+uniform float uFarmOrigin;
+uniform float uFarmSize;
+uniform float uFarmSamples;
+
+vec3 farmSurface(vec2 xz) {
+  vec2 uv = (xz - uFarmOrigin) / uFarmSize;
+  if (uFarmEnabled < 0.5 || min(uv.x, uv.y) < 0.0 || max(uv.x, uv.y) > 1.0) return vec3(0.0);
+  return texture2D(uFarmMap, (uv * (uFarmSamples - 1.0) + 0.5) / uFarmSamples).rgb;
+}
 
 float mowHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -153,6 +176,7 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
 
   // 刈っても同じ芝なので、色みは変えない。伸びた芝は葉どうしの陰で少し暗く、むらがある
   vec3 baseColor = mix(vec3(0.088, 0.205, 0.028), vec3(0.118, 0.240, 0.036), nLarge);
+  vec3 farm = farmSurface(world.xz);
   vec3 longShade = mix(vec3(0.58, 0.56, 0.60), vec3(0.88, 0.82, 0.84), nLarge * 0.4 + nMid * 0.6);
   float tall = smoothstep(0.02, 0.06, height);
   // 伸びた芝でも、踏まれて寝た所は葉の面が上を向き、陰が減って明るく見える
@@ -162,6 +186,8 @@ vec3 mowGrassColor(vec3 world, vec4 state, vec3 eye) {
   longShade *= mix(1.14, 0.84, lengthPatch);
   // 荒れ草地は、手入れされた芝ほど鮮やかな緑ではない。刈った所も刈っていない所も、同じくすんだ緑を土台にする
   baseColor = mix(baseColor, vec3(0.105, 0.165, 0.045) * (0.9 + 0.25 * nLarge), uRough * 0.75);
+  baseColor *= mix(vec3(1.0), mix(vec3(0.80, 0.94, 0.91), vec3(1.40, 1.17, 0.80), farm.r), step(0.01, farm.r));
+  baseColor *= 1.0 - farm.g * 0.18;
   vec3 color = baseColor * mix(vec3(1.0), longShade, tall);
   // 荒れ草地: 伸びた草に、枯れ色の混じった所がまだらにできる
   float dry = uRough * tall * (0.08 + 0.38 * smoothstep(0.42, 0.75, mowNoise(world.xz * 0.16 + 31.0) * 0.6 + nMid * 0.4));
@@ -240,6 +266,9 @@ float grassSheenAmount = grassSheen(mowState);
 // 芝の葉を描く範囲では、葉の根元の陰として地面を少し暗くする
 grassColor *= 1.0 - 0.22 * bladeCoverage(vMowWorld.xz);
 diffuseColor.rgb = grassColor;
+vec3 farmGround = farmSurface(vMowWorld.xz);
+diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.36, 0.29, 0.18) * (0.88 + 0.24 * mowNoise(vMowWorld.xz * 3.0)), farmGround.b);
+grassSheenAmount *= 1.0 - farmGround.b;
 `
 
 /**
@@ -377,6 +406,11 @@ export function createGround(
     uBladeRadius: { value: 1 },
     uBladeAmount: { value: 0 },
     uRough: { value: 0 },
+    uFarmMap: { value: lengthMap },
+    uFarmEnabled: { value: 0 },
+    uFarmOrigin: { value: terrain.origin },
+    uFarmSize: { value: terrain.options.size },
+    uFarmSamples: { value: terrain.samples },
     uSunDir: { value: new Vector3(0, 1, 0) },
     uWindTime: { value: 0 },
     uWindStrength: { value: 1 },

@@ -30,6 +30,18 @@ export interface MapSpec {
 
 export const MAPS: MapSpec[] = [
   {
+    id: 'countryside',
+    name: '田園丘陵',
+    description: '大きくうねる丘と、農道に沿う八つの草地。イタリアの田園をイメージした土地配置',
+    seed: 37,
+    shape: { hillScale: 1.2, mountainScale: 0, pastoral: true },
+    grass: { uncutHeight: 0.13, roughness: 0.35 },
+    trees: null,
+    startX: -210,
+    startZ: -20,
+    plotArea: 50000
+  },
+  {
     id: 'hills',
     name: '丘陵',
     description: 'なだらかな丘が続く芝地。勾配で刈る範囲が分かれる',
@@ -77,5 +89,5 @@ export const MAPS: MapSpec[] = [
 ]
 
 export function findMap(id: string | null): MapSpec {
-  return MAPS.find((map) => map.id === id) ?? MAPS[0]
+  return MAPS.find((map) => map.id === id) ?? MAPS.find((map) => map.id === 'hills')!
 }

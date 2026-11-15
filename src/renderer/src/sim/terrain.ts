@@ -11,6 +11,8 @@ export interface TerrainShape {
   mountainScale: number
   /** 遠くを平野にする(山並みを置かず、丘の起伏も遠くほど小さくする) */
   plain?: boolean
+  /** 田園向けの長い波長の丘陵 */
+  pastoral?: boolean
 }
 
 export const DEFAULT_SHAPE: TerrainShape = { hillScale: 1, mountainScale: 1 }
@@ -89,6 +91,13 @@ export function terrainHeight(
   seed: number,
   shape: TerrainShape = DEFAULT_SHAPE
 ): number {
+  if (shape.pastoral) {
+    return shape.hillScale * (
+      32 * gradientNoise(x / 310, z / 310, seed) +
+      9 * gradientNoise(x / 155, z / 155, seed + 101) +
+      2 * gradientNoise(x / 75, z / 75, seed + 202)
+    )
+  }
   let hills = 0
   for (let i = 0; i < HILL_OCTAVES.length; i++) {
     const [wavelength, amplitude] = HILL_OCTAVES[i]

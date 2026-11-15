@@ -320,6 +320,7 @@ vBladeT = bladeT;
 `
 
 const FRAGMENT_COLOR = /* glsl */ `
+if (farmSurface(vBladeRoot.xz).b > 0.15) discard;
 vec4 bladeState = mowSample(vBladeRoot.xz);
 vec3 bladeColor = mowGrassColor(vBladeRoot, bladeState, cameraPosition);
 float grassSheenAmount = grassSheen(bladeState);

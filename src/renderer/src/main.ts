@@ -17,7 +17,8 @@ import { CAMERA_MODES, CAMERA_MODE_LABELS, CameraRig, ORBIT_LEVELS, type CameraM
 import { Clippings } from './render/clippings'
 import { GrassBlades } from './render/grassBlades'
 import { NormalPreview } from './render/normalPreview'
-import { createGround } from './render/ground'
+import { applyCountryside, createGround } from './render/ground'
+import { createCountryside, countrysidePlots } from './sim/countryside'
 import { Lighting } from './render/lighting'
 import { MowMap } from './render/mowMap'
 import { OVERLAY_PALETTE, overlayColor, overlayPixelRatio, overlayResolution } from './render/overlay/ribbon'
@@ -162,9 +163,10 @@ const terrain = new Terrain({
   seed: Number.isInteger(querySeed) && querySeed > 0 ? querySeed : map.seed,
   shape: map.shape
 })
+const farm = map.id === 'countryside' ? createCountryside(terrain) : null
 
 // 樹木。芝刈り機が入れない所の格子も作る(区分けで「刈らない」になる)
-const treeList = map.trees ? generateTrees(map.trees, terrain.options.seed, START_X, START_Z) : []
+const treeList = farm ? farm.trees : map.trees ? generateTrees(map.trees, terrain.options.seed, START_X, START_Z) : []
 const blocked = map.trees
   ? blockedByTrees(
       treeList,
@@ -174,7 +176,11 @@ const blocked = map.trees
       terrain.options.cell,
       terrain.origin
     )
-  : undefined
+  : farm ? Uint8Array.from(farm.parcels, (_, i) => {
+      const x = terrain.origin + (i % terrain.samples) * terrain.options.cell
+      const z = terrain.origin + Math.floor(i / terrain.samples) * terrain.options.cell
+      return farm.trees.some((tree) => Math.hypot(x - tree.x, z - tree.z) < 3) ? 1 : 0
+    }) : undefined
 const treeModels = new Trees(treeList, terrain, renderer)
 scene.add(treeModels.group)
 // 動作確認用: cull=0 で、樹木を視錐台で選ばずにすべて描く(選ぶ場合と見た目を比べる)
@@ -237,6 +243,7 @@ const ground = createGround(
 )
 scene.add(ground.mesh)
 ground.uniforms.uRough.value = map.grass.roughness
+if (farm) applyCountryside(ground, farm, terrain)
 // 太陽の向きは、光の設定と同じものを見る(逆光のときの芝の色に使う)
 ground.uniforms.uSunDir.value = lighting.sunDirection
 
@@ -318,7 +325,7 @@ function updatePlots(): void {
   const cell = terrain.options.cell
   const reach = new Uint8Array(n * n)
   for (let i = 0; i < reach.length; i++) reach[i] = zones.regions[zones.labels[i]].reachable ? 1 : 0
-  const result = clusterPlots(
+  const result = farm ? countrysidePlots(farm, reach, n, cell) : clusterPlots(
     reach,
     terrain.heights,
     n,
@@ -859,7 +866,8 @@ function resetAll(): void {
 
 // 起動時の指定(動作確認用): ?auto=1&timescale=16&cam=orbit&ui=0&help=1&seed=7&zones=1&path=1&mowers=3&ride=1
 // 最初は誰にも乗らず、出発点のあたりを俯瞰で見る
-rig.setFreeFocus(START_X, START_Z)
+rig.setFreeFocus(farm ? 0 : START_X, farm ? 0 : START_Z)
+if (farm) rig.setZoom(6)
 rig.setMode('top')
 if (query.get('auto') === '1') for (const unit of mowers) unit.autoDrive = true
 const queryScale = Number(query.get('timescale'))
@@ -1332,7 +1340,7 @@ syncs.push(
     },
     format: (v) => `${v.toFixed(0)} mm`
   }),
-  addSlider(routeFields, {
+  ...(farm ? [] : [addSlider(routeFields, {
     label: '区画の広さ',
     title: '区画 1 つの広さの目安。刈れる範囲を、標高や斜面の向きが似た所どうしで、この広さの区画に分けます',
     min: 2000,
@@ -1345,7 +1353,7 @@ syncs.push(
       markRoutesDirty(true)
     },
     format: (v) => `${(v / 10000).toFixed(1)} ha`
-  }),
+  })]),
   addCheck(
     routeFields,
     '順に刈り進める',
